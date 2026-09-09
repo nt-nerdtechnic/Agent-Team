@@ -8,12 +8,16 @@ import {
   groupHistoryByDay,
   historyCleanupCutoffIso,
   historyCleanupMatches,
+  historyEntriesFor,
   historyEntryLabel,
+  isHistoryEntryRemoved,
   legacyHistoryLogPath,
   manualLogFileName,
   matchesHistorySearch,
   updateHistoryCustomName,
+  type HistoryStatusFilter,
   type HistoryTitleEntry,
+  type SpawnHistoryEntry,
 } from '../spawnHistory'
 import {
   formatTerminalExit,
@@ -27,6 +31,22 @@ function entry(overrides: Partial<HistoryTitleEntry> = {}): HistoryTitleEntry {
   return {
     paneId: 'pane-1',
     agentLabel: 'Claude Code',
+    ...overrides,
+  }
+}
+
+/** A complete record, for the helpers that read more than the title fields. */
+function fullEntry(overrides: Partial<SpawnHistoryEntry> = {}): SpawnHistoryEntry {
+  return {
+    paneId: 'pane-1',
+    agentKey: 'claude',
+    agentLabel: 'Claude Code',
+    roleKey: 'dev' as SpawnHistoryEntry['roleKey'],
+    roleLabel: 'Dev',
+    command: 'claude',
+    origin: 'manual',
+    stageId: '' as SpawnHistoryEntry['stageId'],
+    workspacePath: '/ws',
     ...overrides,
   }
 }
@@ -518,5 +538,127 @@ describe('history cleanup helpers', () => {
       starredOld,
       { spawnedAt: '2026-07-01T00:00:00Z', removedAt: '2026-07-02T00:00:00Z' },
     ], 'removed')).toBe(1)
+  })
+})
+
+// A removed pane whose removal time was never recorded is still a removed
+// pane. Before removedTimeUnknown existed, the restore backfill filled both
+// timestamps with project.updated_at — rewritten on every save — so a whole
+// batch of old sessions arrived carrying roughly the app's start time and
+// piled into "Today". The fields now say "unknown" instead, which only works
+// if every liveness test asks both of them.
+describe('removed entries whose removal time is unknown', () => {
+  it('isHistoryEntryRemoved answers on either field', () => {
+    expect(isHistoryEntryRemoved({ removedAt: '2026-07-20T00:00:00Z' })).toBe(true)
+    expect(isHistoryEntryRemoved({ removedTimeUnknown: true })).toBe(true)
+    expect(isHistoryEntryRemoved({})).toBe(false)
+  })
+
+  it('the status filter counts them as removed, not active', () => {
+    const unknown = fullEntry({ paneId: 'no-time', removedTimeUnknown: true })
+    const live = fullEntry({ paneId: 'live' })
+    const timed = fullEntry({ paneId: 'timed', removedAt: '2026-07-20T00:00:00Z' })
+    const entries = [unknown, live, timed]
+    const ids = (status: HistoryStatusFilter): string[] =>
+      filterHistoryEntries(entries, { query: '', status, origin: 'all' }).map((e) => e.paneId)
+    expect(ids('removed')).toEqual(['no-time', 'timed'])
+    expect(ids('active')).toEqual(['live'])
+  })
+
+  it('bulk cleanup can still sweep them in removed mode', () => {
+    expect(historyCleanupMatches({ removedTimeUnknown: true }, 'removed')).toBe(true)
+    // 'older_than' needs a spawnedAt to compare, so it leaves them alone.
+    expect(historyCleanupMatches(
+      { removedTimeUnknown: true },
+      'older_than',
+      historyCleanupCutoffIso(new Date('2026-07-22T12:00:00Z')),
+    )).toBe(false)
+  })
+
+  it('groups an entry with no spawn time under earlier, never today', () => {
+    const groups = groupHistoryByDay(
+      [{ paneId: 'no-time', spawnedAt: undefined }],
+      new Date('2026-07-22T12:00:00Z'),
+    )
+    expect(groups.map((g) => g.key)).toEqual(['earlier'])
+  })
+
+  it('has no legacy log path to guess without a spawn date', () => {
+    // The manual layout files the log under a UTC date folder; without a date
+    // there is nothing to reconstruct, and guessing from "now" would point the
+    // reader at a folder the log was never written to.
+    const base = {
+      origin: 'manual' as const,
+      stageId: '',
+      paneId: 'abcd1234-5678',
+      agentKey: 'claude',
+    }
+    expect(legacyHistoryLogPath(base, '/ws')).toBe('')
+    expect(legacyHistoryLogPath({ ...base, spawnedAt: '' }, '/ws')).toBe('')
+    expect(legacyHistoryLogPath({ ...base, spawnedAt: 'not-a-date' }, '/ws')).toBe('')
+    // Pipeline logs are named from the stage and pane id alone, so they are
+    // still reconstructable with no date at all.
+    expect(legacyHistoryLogPath({ ...base, origin: 'pipeline', stageId: 'build' }, '/ws'))
+      .toBe('/ws/.agent-team/stage-build-abcd1234.log')
+  })
+})
+
+// A restore reopens a session under a fresh pane id and files a brand new
+// record for it. That record has no title yet, and it is the newest — so
+// dedupe kept it and dropped the older, named row, which is how renamed
+// agents fell back to their vendor label after every restart.
+describe('historyEntriesFor', () => {
+  const ws = { workspacePath: '/ws' }
+
+  it('keeps the newest row per session but inherits the name it lost', () => {
+    const out = historyEntriesFor([
+      fullEntry({ paneId: 'old', sessionId: 's1', autoName: 'Refactor the parser' }),
+      fullEntry({ paneId: 'new', sessionId: 's1' }),
+    ], ws)
+    expect(out).toHaveLength(1)
+    expect(out[0].paneId).toBe('new')
+    expect(out[0].autoName).toBe('Refactor the parser')
+    expect(historyEntryLabel(out[0])).toBe('Refactor the parser')
+  })
+
+  it('lets a user rename on the older row survive too', () => {
+    const out = historyEntriesFor([
+      fullEntry({ paneId: 'old', sessionId: 's1', customName: 'Frontend Lead' }),
+      fullEntry({ paneId: 'new', sessionId: 's1' }),
+    ], ws)
+    expect(out[0].customName).toBe('Frontend Lead')
+  })
+
+  it('does not let an older name override a newer one', () => {
+    const out = historyEntriesFor([
+      fullEntry({ paneId: 'oldest', sessionId: 's1', autoName: 'First topic' }),
+      fullEntry({ paneId: 'newest', sessionId: 's1', autoName: 'Current topic' }),
+    ], ws)
+    expect(out[0].autoName).toBe('Current topic')
+  })
+
+  it('never mutates the source rows (spawnHistory feeds the persist watcher)', () => {
+    const older = fullEntry({ paneId: 'old', sessionId: 's1', autoName: 'Kept name' })
+    const newer = fullEntry({ paneId: 'new', sessionId: 's1' })
+    const out = historyEntriesFor([older, newer], ws)
+    expect(newer.autoName).toBeUndefined()
+    expect(out[0]).not.toBe(newer)
+  })
+
+  it('still dedupes by pane id when there is no session id, newest first', () => {
+    const out = historyEntriesFor([
+      fullEntry({ paneId: 'a' }),
+      fullEntry({ paneId: 'b' }),
+      fullEntry({ paneId: 'a' }),
+    ], ws)
+    expect(out.map((e) => e.paneId)).toEqual(['a', 'b'])
+  })
+
+  it('drops another workspace\'s entries', () => {
+    const out = historyEntriesFor([
+      fullEntry({ paneId: 'mine' }),
+      fullEntry({ paneId: 'theirs', workspacePath: '/other' }),
+    ], ws)
+    expect(out.map((e) => e.paneId)).toEqual(['mine'])
   })
 })

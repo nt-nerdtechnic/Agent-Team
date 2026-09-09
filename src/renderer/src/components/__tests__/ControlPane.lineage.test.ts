@@ -178,7 +178,7 @@ describe('ControlPane – lineage tree', () => {
           displayPath: '~/ws',
           isCurrent: true,
           collapsed: false,
-          count: 3,
+          count: 3, paneIds: [],
           lineage: [],
           groups: [
             {
@@ -216,7 +216,7 @@ describe('ControlPane – lineage tree', () => {
           displayPath: '~/deep',
           isCurrent: true,
           collapsed: true,
-          count: 2,
+          count: 2, paneIds: [],
           lineage: [],
           groups: [
             {
@@ -235,7 +235,7 @@ describe('ControlPane – lineage tree', () => {
           displayPath: '~/flat',
           isCurrent: true,
           collapsed: false,
-          count: 1,
+          count: 1, paneIds: [],
           lineage: [],
           groups: [
             { id: '', name: '', rows: [{ id: 'kid-2', depth: 0, hasChildren: false, collapsed: false }] }
@@ -261,7 +261,7 @@ describe('ControlPane – lineage tree', () => {
           displayPath: '~/ws',
           isCurrent: true,
           collapsed: false,
-          count: 3,
+          count: 3, paneIds: [],
           lineage: [],
           groups: [
             {

@@ -272,7 +272,9 @@ interface RunningPlugin {
   fill: boolean
   /** Removes the host `resize` listener; null when none is attached. */
   detachHostResize: (() => void) | null
-  /** Removes the host `closed` listener; null after instance teardown. */
+  /** Removes the listeners this instance put on its host window — `closed`,
+   *  and the `did-start-navigation` watch that reads a host reload as a
+   *  deliberate teardown; null after instance teardown. */
   detachHostClosed: (() => void) | null
   /** True when the host window exists solely for this view (dedicated plugin
    *  window): `hideSelf` then closes the window (legacy editor Esc semantics)
@@ -284,6 +286,13 @@ interface RunningPlugin {
   ready: boolean
   /** True once the renderer sent the authenticated readiness handshake. */
   pluginReady: boolean
+  /** True once the Host knows this instance is on its way out for a reason
+   *  that is not the plugin's fault. Teardowns the Host drives itself
+   *  (`destroyInstance`, and so `closeContribution`) need no flag — they
+   *  forget the record before the guest dies, so `destroyed` finds nothing.
+   *  This covers the one case that cannot: the host document navigating away,
+   *  which destroys every guest it carries without running any Host code. */
+  releasing: boolean
   pendingTargets: Record<string, string>[]
 }
 
@@ -1050,6 +1059,11 @@ export class FrontendPluginManager {
     string,
     ReturnType<typeof setTimeout> | null
   >()
+  /** Instances whose readiness budget already bought them one reload. A missed
+   *  budget is usually a loaded machine rather than a broken package, so the
+   *  guest is reloaded once before the failure is allowed to cost the session
+   *  its v2 activation. */
+  private readonly readinessReloaded = new Set<string>()
   /** Opaque picker provenance for the private first-party Git bridge. */
   private readonly gitPathGrants = new Map<string, GitPathGrant>()
   /** One unbound remote operation owns each interactive askpass exchange.
@@ -5193,6 +5207,7 @@ export class FrontendPluginManager {
     const plugin = this.running.get(instanceId)
     if (!plugin) return undefined
     this.settleActivation(instanceId)
+    this.readinessReloaded.delete(instanceId)
     plugin.detachHostResize?.()
     plugin.detachHostResize = null
     plugin.detachHostClosed?.()
@@ -5506,6 +5521,7 @@ export class FrontendPluginManager {
       closeHostOnHide: input.closeHostOnHide,
       ready: false,
       pluginReady: false,
+      releasing: false,
       pendingTargets: [],
     }
   }
@@ -5617,8 +5633,28 @@ export class FrontendPluginManager {
     const onHostClosed = (): void => {
       if (this.running.get(instanceId)?.view.webContents === contents) this.destroyInstance(instanceId)
     }
+    // A host document that navigates away — reload, devtools reload, dev HMR,
+    // crash restore — takes its `<webview>` guests down with it, and a document
+    // unload runs no renderer unmount hook, so nothing on the Host side would
+    // otherwise mark these teardowns deliberate.
+    const onHostNavigated = (
+      _event: unknown,
+      _url: string,
+      isInPlace: boolean,
+      isMainFrame: boolean
+    ): void => {
+      if (!isMainFrame || isInPlace) return
+      const current = this.running.get(instanceId)
+      if (current?.view.webContents === contents) current.releasing = true
+    }
     hostWindow.on('closed', onHostClosed)
-    record.detachHostClosed = () => hostWindow.removeListener('closed', onHostClosed)
+    hostWindow.webContents.on('did-start-navigation', onHostNavigated)
+    record.detachHostClosed = () => {
+      hostWindow.removeListener('closed', onHostClosed)
+      if (!hostWindow.isDestroyed()) {
+        hostWindow.webContents.removeListener('did-start-navigation', onHostNavigated)
+      }
+    }
 
     // Defensive cleanup: if the view's webContents dies through any path other
     // than destroy() (renderer crash, Electron teardown), drop the record so
@@ -5629,9 +5665,21 @@ export class FrontendPluginManager {
     // replacement has been wired onto the same instance id, and would
     // otherwise tear down the live panel and report a spurious activation
     // failure for a plugin that is running fine.
+    //
+    // `destroyed` cannot tell a fault from an ordinary teardown on its own, so
+    // the Host says which it is: every path that takes an instance down on
+    // purpose marks the record `releasing` first. Keying on the load phase
+    // instead does not work — a guest torn down by the UI seconds *after* its
+    // entry loaded (a region re-preparing for another workspace, the host
+    // document navigating away) looks exactly like one that died on its own,
+    // and reporting it downgrades a working package for the rest of the
+    // session. `forgetInstance` settles the pending activation either way.
     contents.once('destroyed', () => {
-      if (this.running.get(instanceId)?.view.webContents !== contents) return
-      this.failActivation(instanceId, 'plugin renderer exited before readiness')
+      const record = this.running.get(instanceId)
+      if (record?.view.webContents !== contents) return
+      if (!record.releasing) {
+        this.failActivation(instanceId, 'plugin renderer exited before readiness')
+      }
       const plugin = this.forgetInstance(instanceId)
       if (plugin) this.detachView(plugin)
     })
@@ -5670,6 +5718,20 @@ export class FrontendPluginManager {
         !current.pluginReady
       ) {
         const timer = setTimeout(() => {
+          const live = this.running.get(instanceId)
+          if (live?.view.webContents !== contents || live.pluginReady) return
+          if (!this.readinessReloaded.has(instanceId)) {
+            this.readinessReloaded.add(instanceId)
+            // Re-arm through `did-finish-load` by handing the budget back its
+            // "entry still loading" sentinel, then reload the guest only.
+            this.pendingActivations.set(instanceId, null)
+            try {
+              contents.reload()
+              return
+            } catch {
+              // Guest already gone — fall through and report the failure.
+            }
+          }
           this.failActivation(instanceId, 'plugin readiness handshake timed out')
         }, 10_000)
         timer.unref?.()

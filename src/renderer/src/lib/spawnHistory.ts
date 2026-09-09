@@ -23,8 +23,15 @@ export interface SpawnHistoryEntry extends HistoryTitleEntry {
   origin: 'manual' | 'pipeline' | 'mcp'
   stageId: StageId
   workspacePath: string
-  spawnedAt: string
+  /** Absent when the record was rebuilt from a source that never carried a
+   *  spawn time. Left unknown rather than filled in: a stand-in timestamp
+   *  buckets the entry under a day it did not happen on. */
+  spawnedAt?: string
   removedAt?: string
+  /** True when the pane is known removed but no removal time was ever
+   *  recorded (records written before pane timestamps existed). Kept apart
+   *  from removedAt so the list can say "removed" without inventing a time. */
+  removedTimeUnknown?: boolean
   restoreMode?: 'memory-resume' | 'fresh'
   sessionHomeId?: string
   runGroupId?: string
@@ -70,6 +77,44 @@ export function filterWorkspaceEntries<T extends { workspacePath?: string }>(
   return entries.filter((entry) => entryBelongsToWorkspace(entry, workspace))
 }
 
+/** Newest first, one row per session (pane id as the fallback key), filtered
+ *  to one workspace. Shared by the viewed workspace's live list and another
+ *  workspace's read-only copy so the two cannot dedupe differently. */
+export function historyEntriesFor(
+  entries: readonly SpawnHistoryEntry[],
+  workspace: WorkspaceIdentity,
+): SpawnHistoryEntry[] {
+  const result: SpawnHistoryEntry[] = []
+  const kept = new Map<string, number>()
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]
+    // Display-layer guard: never show another workspace's entries, even if
+    // one slipped into the buffer at runtime.
+    if (!entryBelongsToWorkspace(entry, workspace)) continue
+    const key = entry.sessionId ? `session:${entry.sessionId}` : `pane:${entry.paneId}`
+    const at = kept.get(key)
+    if (at === undefined) {
+      kept.set(key, result.length)
+      result.push(entry)
+      continue
+    }
+    // A restore reopens the session under a fresh pane id and files a brand new
+    // record for it, so the newest row of a session is regularly the one that
+    // never carried a title — and dropping the older rows outright is what made
+    // renamed agents fall back to their vendor label after every restart. The
+    // newest row still wins (it holds the current pane), but it inherits the
+    // most recent name the session had. Copied, never patched in place:
+    // spawnHistory is what the persist watcher writes back.
+    const winner = result[at]
+    const customName = winner.customName ?? entry.customName
+    const autoName = winner.autoName ?? entry.autoName
+    if (customName !== winner.customName || autoName !== winner.autoName) {
+      result[at] = { ...winner, customName, autoName }
+    }
+  }
+  return result
+}
+
 /** Display title for a history entry, in priority order:
  *  user rename > auto-derived name > vendor default label. */
 export function historyEntryLabel(entry: HistoryTitleEntry): string {
@@ -89,6 +134,16 @@ export function matchesHistorySearch(
     .some((field) => !!field && field.toLowerCase().includes(q))
 }
 
+/** Whether a history entry's pane is gone. Two fields answer that question —
+ *  a recorded removal time, or the flag that says the pane is gone but the
+ *  time was never written — so every "is this still live?" test has to ask
+ *  both, or entries with an unknown removal time read as still running. */
+export function isHistoryEntryRemoved(
+  entry: { removedAt?: string; removedTimeUnknown?: boolean }
+): boolean {
+  return !!entry.removedAt || !!entry.removedTimeUnknown
+}
+
 export type HistoryStatusFilter = 'all' | 'active' | 'removed'
 export type HistoryOriginFilter = 'all' | 'manual' | 'pipeline'
 
@@ -104,21 +159,23 @@ export interface HistoryEntryFilter {
   contentMatchedIds?: Set<string>
 }
 
-/** Combines the text search with a status filter (active = no removedAt),
+/** Combines the text search with a status filter (active = not removed, see
+ *  isHistoryEntryRemoved),
  *  an origin filter, and the starred-only toggle. 'all' (or a false
  *  starredOnly) disables the corresponding dimension. An entry passes the
  *  text search if its metadata matches `filter.query`, or (union) if its
  *  paneId is in `filter.contentMatchedIds`. */
 export function filterHistoryEntries<T extends HistoryTitleEntry & {
   removedAt?: string
+  removedTimeUnknown?: boolean
   origin?: 'manual' | 'pipeline' | 'mcp'
   roleKey?: string
   roleLabel?: string
   starred?: boolean
 }>(entries: T[], filter: HistoryEntryFilter): T[] {
   return entries.filter((entry) => {
-    if (filter.status === 'active' && entry.removedAt) return false
-    if (filter.status === 'removed' && !entry.removedAt) return false
+    if (filter.status === 'active' && isHistoryEntryRemoved(entry)) return false
+    if (filter.status === 'removed' && !isHistoryEntryRemoved(entry)) return false
     if (filter.origin === 'pipeline' && entry.origin !== 'pipeline') return false
     // The 'manual' filter means "not a pipeline pane" — mcp-spawned panes belong here too.
     if (filter.origin === 'manual' && entry.origin === 'pipeline') return false
@@ -220,11 +277,11 @@ export function historyCleanupCutoffIso(now: Date, days = HISTORY_CLEANUP_DAYS):
  *  cleanup; 'older_than' additionally requires a parseable spawnedAt
  *  strictly before the cutoff. */
 export function historyCleanupMatches(
-  entry: { removedAt?: string; spawnedAt?: string; starred?: boolean },
+  entry: { removedAt?: string; removedTimeUnknown?: boolean; spawnedAt?: string; starred?: boolean },
   mode: HistoryCleanupMode,
   cutoffIso?: string
 ): boolean {
-  if (!entry.removedAt || entry.starred) return false
+  if (!isHistoryEntryRemoved(entry) || entry.starred) return false
   if (mode === 'removed') return true
   if (!cutoffIso || !entry.spawnedAt) return false
   const spawned = new Date(entry.spawnedAt).getTime()
@@ -233,7 +290,7 @@ export function historyCleanupMatches(
 }
 
 export function countHistoryCleanupEntries(
-  entries: { removedAt?: string; spawnedAt?: string; starred?: boolean }[],
+  entries: { removedAt?: string; removedTimeUnknown?: boolean; spawnedAt?: string; starred?: boolean }[],
   mode: HistoryCleanupMode,
   cutoffIso?: string
 ): number {
@@ -284,7 +341,7 @@ export function updateHistoryCustomName(
 }
 
 export interface LegacyHistoryLogPathEntry {
-  spawnedAt: string
+  spawnedAt?: string
   origin: 'manual' | 'pipeline' | 'mcp'
   stageId: string
   paneId: string
@@ -300,10 +357,18 @@ export function manualLogFileName(agentKey: string, paneId: string): string {
 
 /** Reconstructs the conversation log path for spawnHistory entries persisted
  *  before outputLogFile was recorded at spawn time. Best-effort: assumes the
- *  workspace and UTC spawn date used at spawn time, which may drift. */
+ *  workspace and UTC spawn date used at spawn time, which may drift.
+ *
+ *  Returns '' when there is nothing to guess from: the manual layout puts the
+ *  log under a date folder, so without a usable spawnedAt there is no path to
+ *  reconstruct — and guessing one from "now" would send the reader at a folder
+ *  the log was never written to. Callers treat '' as "no legacy path". */
 export function legacyHistoryLogPath(entry: LegacyHistoryLogPathEntry, workspacePath: string): string {
-  const ymd = new Date(entry.spawnedAt).toISOString().slice(0, 10).replace(/-/g, '')
-  return entry.origin === 'pipeline'
-    ? `${workspacePath}/.agent-team/stage-${entry.stageId}-${entry.paneId.slice(0, 8)}.log`
-    : `${workspacePath}/.agent-team/manual/${ymd}/${manualLogFileName(entry.agentKey, entry.paneId)}`
+  if (entry.origin === 'pipeline') {
+    return `${workspacePath}/.agent-team/stage-${entry.stageId}-${entry.paneId.slice(0, 8)}.log`
+  }
+  const spawned = entry.spawnedAt ? new Date(entry.spawnedAt) : null
+  if (!spawned || Number.isNaN(spawned.getTime())) return ''
+  const ymd = spawned.toISOString().slice(0, 10).replace(/-/g, '')
+  return `${workspacePath}/.agent-team/manual/${ymd}/${manualLogFileName(entry.agentKey, entry.paneId)}`
 }

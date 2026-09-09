@@ -780,6 +780,6 @@ MCP の `cli_send` から、あるいは別の Machine から中継されたも�
 | CLI が Turn の途中で入力を Queue するか | `src/renderer/src/platform/plugin-shell/agents/<key>.ts`（`acceptsMidTurnInput`） |
 | 受信者から見た Queue | `backend/agent_team_backend/agent_message_log.py`（`pending_incoming`） |
 | Install される hook コマンドと、どのイベントが応答を保持するか | `backend/agent_team_backend/claude_hooks.py` |
-| 配信結果と Hold を、MCP の呼び出し元が読む形で | `backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py` |
+| 配信結果と Hold を、MCP の呼び出し元が読む形で | `backend/agent_team_backend/mcp_server/server.py` |
 | Agent に渡される Protocol テキスト | `src/renderer/src/data/stages.ts` |
 | 配信 Log の UI | `src/renderer/src/components/AgentMessagesPanel.vue` |

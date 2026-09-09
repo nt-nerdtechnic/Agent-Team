@@ -14,7 +14,8 @@ import StageTabBar, { type TabItem } from '../StageTabBar.vue'
 const tabs: TabItem[] = [
   { key: 'rg-1', label: 'Main', count: 12, type: 'stage', status: 'active' },
   { key: 'rg-2', label: 'Specs', count: 7, type: 'stage', status: 'idle' },
-  { key: 'rg-3', label: 'Empty', count: 0, type: 'stage', status: 'empty' }
+  { key: 'rg-3', label: 'Empty', count: 0, type: 'stage', status: 'empty' },
+  { key: 'rg-4', label: 'Blocked', count: 3, type: 'stage', status: 'awaiting' }
 ]
 
 function mountBar(items: TabItem[] = tabs) {
@@ -27,8 +28,13 @@ function mountBar(items: TabItem[] = tabs) {
 describe('StageTabBar – status dot', () => {
   it('renders one dot per tab, carrying that tab\'s status', () => {
     const dots = mountBar().findAll('.tab-dot')
-    expect(dots).toHaveLength(3)
-    expect(dots.map((d) => d.attributes('data-state'))).toEqual(['active', 'idle', 'empty'])
+    expect(dots).toHaveLength(4)
+    expect(dots.map((d) => d.attributes('data-state'))).toEqual([
+      'active',
+      'idle',
+      'empty',
+      'awaiting'
+    ])
   })
 
   it('gives the dot hover and accessible text', () => {
@@ -42,7 +48,7 @@ describe('StageTabBar – status dot', () => {
     await wrapper.findAll('.tab-btn')[0].trigger('dblclick')
 
     expect(wrapper.find('.tab-rename-input').exists()).toBe(true)
-    expect(wrapper.findAll('.tab-dot')).toHaveLength(3)
+    expect(wrapper.findAll('.tab-dot')).toHaveLength(4)
   })
 
   it('places the dot before the label so it reads as a leading indicator', () => {
@@ -68,5 +74,24 @@ describe('StageTabBar – the shape of the status dot', () => {
     expect(key).toContain('width: 7px')
     expect(key).toContain('height: 7px')
     expect(key).toContain('border-radius: 2px')
+  })
+
+  it('paints every state on both surfaces, from the same tokens', () => {
+    // Neither surface is in statusBadgeCss.test.ts — they speak TabRunState,
+    // not DisplayStatus — so a state added to rollupTabStatus with no rule here
+    // would fall through to the neutral grey and read as "nothing to report".
+    // 'awaiting' shipped that way once: green won, and a blocked pane was
+    // invisible from the tab bar.
+    const bar = readFileSync(resolve(__dirname, '../StageTabBar.vue'), 'utf8')
+    const pane = readFileSync(resolve(__dirname, '../ControlPane.vue'), 'utf8')
+
+    expect(bar).toContain(".tab-dot[data-state='awaiting'] { background: var(--warning-fg); }")
+    expect(bar).toContain(".tab-dot[data-state='active'] { background: var(--success-fg); }")
+    expect(pane).toContain(
+      ".ws-grp[data-state='awaiting'] .ws-grp-key { background: var(--warning-fg); }"
+    )
+    expect(pane).toContain(
+      ".ws-grp[data-state='active'] .ws-grp-key { background: var(--success-fg); }"
+    )
   })
 })

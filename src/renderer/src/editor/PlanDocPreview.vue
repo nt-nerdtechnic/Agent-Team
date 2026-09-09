@@ -44,10 +44,6 @@ const loadErrorDetail = ref('')
 // True while the frame reports an in-progress inline section edit; the host
 // (PlanWindowApp) checks this so ESC cancels the edit before closing the window.
 const editing = ref(false)
-// True while a load was skipped because the backend wasn't connected. The
-// status watcher below retries; without it the skip would be permanent, since
-// loadDoc otherwise only re-runs on a refresh bump.
-const waitingForBackend = ref(false)
 // Last position reported by the runtime; re-injected on reload so a meta
 // write does not jump the document back to the top.
 const scrollY = ref(0)
@@ -55,11 +51,35 @@ const scrollY = ref(0)
 let todoIds: string[] = []
 let anchors: string[] = []
 
+// Bounded self-retry for a load that could not reach the backend. The window
+// can open while the backend is still starting, so a first read may genuinely
+// fail; without this the preview would sit on the error state until a refresh
+// bump, since the transport status is not a reliable recovery signal.
+const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000]
+let retryTimer: ReturnType<typeof setTimeout> | null = null
+let retryAttempt = 0
+
+function cancelRetry(): void {
+  if (retryTimer !== null) clearTimeout(retryTimer)
+  retryTimer = null
+}
+
+function scheduleRetry(): void {
+  const delay = RETRY_DELAYS_MS[retryAttempt]
+  if (delay === undefined) return // attempts exhausted; the error state stands
+  retryAttempt += 1
+  retryTimer = setTimeout(() => {
+    retryTimer = null
+    void loadDoc()
+  }, delay)
+}
+
 function setLoadError(reason: unknown): void {
   currentDocumentToken.value = null
   loadError.value = true
   loadErrorDetail.value =
     reason instanceof Error ? reason.message : String(reason ?? '').trim()
+  scheduleRetry()
 }
 
 async function loadDoc(): Promise<void> {
@@ -68,16 +88,12 @@ async function loadDoc(): Promise<void> {
   // otherwise `editing` sticks true and ESC keeps calling cancelEdit() instead
   // of closing the window.
   editing.value = false
-  // The window mounts and opens its plan while the backend may still be
-  // starting, and the client's timer covers queue-wait plus in-flight — so a
-  // request sent now would just burn the timeout and leave the preview stuck
-  // on the error state for good. Wait for the connection instead (PlansPane
-  // gates its own load the same way).
-  if (props.backend.status?.value && props.backend.status.value !== 'connected') {
-    waitingForBackend.value = true
-    return
-  }
-  waitingForBackend.value = false
+  cancelRetry()
+  // Always attempt the read: the transport status is host-pushed and can be
+  // stale ('connecting'/'disconnected' while calls still land), and gating on
+  // it rendered an empty srcdoc that is visually identical to a loaded plan.
+  // The review toolbar reads this same file through this same send with no
+  // such check; a failure here is recovered by scheduleRetry() instead.
   try {
     const resp = await props.backend.send<{ ok: boolean; content?: string; error?: string }>(
       'fs.read_file',
@@ -108,6 +124,7 @@ async function loadDoc(): Promise<void> {
     currentDocumentToken.value = prepared.documentToken
     loadError.value = false
     loadErrorDetail.value = ''
+    retryAttempt = 0
   } catch (err) {
     setLoadError(err)
   }
@@ -135,21 +152,28 @@ onMounted(() => {
   window.addEventListener('message', onMessage)
   void loadDoc()
 })
-onBeforeUnmount(() => window.removeEventListener('message', onMessage))
+onBeforeUnmount(() => {
+  window.removeEventListener('message', onMessage)
+  cancelRetry()
+})
 
 watch(
   () => props.refresh,
   () => {
+    retryAttempt = 0
     void loadDoc()
   },
 )
 
-// Retry on (re)connect: both a boot-time skip and a request that failed while
-// the socket was down would otherwise never recover on their own.
+// Retry on (re)connect, ahead of the backoff timer: a request that failed
+// while the socket was down should recover as soon as it returns.
 watch(
   () => props.backend.status?.value,
   (status) => {
-    if (status === 'connected' && (waitingForBackend.value || loadError.value)) void loadDoc()
+    if (status === 'connected' && loadError.value) {
+      retryAttempt = 0
+      void loadDoc()
+    }
   },
 )
 

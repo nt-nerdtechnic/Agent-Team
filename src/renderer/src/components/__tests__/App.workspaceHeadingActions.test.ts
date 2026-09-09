@@ -73,6 +73,9 @@ describe('a workspace heading acts on its own workspace', () => {
     // copy of what spawnHistory already holds, live.
     const fn = body('onOpenWorkspaceHistory')
     expect(fn).toContain("? workspacePath : ''")
-    expect(fn).toContain('if (foreign) await loadForeignHistory(foreign)')
+    // Opening runs a refresh, and that is where the branch lives: the foreign
+    // copy is built only when the modal is showing another project.
+    expect(fn).toContain('await onRefreshHistory()')
+    expect(body('onRefreshHistory')).toContain('if (historyIsForeign.value) {')
   })
 })

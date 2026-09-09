@@ -1,20 +1,30 @@
 /** Roll a run-group's per-pane statuses up into the single dot shown on its
  *  StageTabBar tab.
  *
- *  Deliberately two colours plus "nothing to report": the dot answers one
- *  question — is anything in this tab moving? Every finer distinction
- *  (awaiting, error, disconnected) already has a home in the pane badge and
- *  the agent overview, and folding them in here would trade a glanceable
+ *  Three colours plus "nothing to report". The dot answers two questions, in
+ *  this order: is anything here waiting on *you*, and failing that, is anything
+ *  moving on its own? Waiting comes first because it is the only one of the two
+ *  that stalls until a person acts — a tab where one pane holds a permission
+ *  prompt while another runs is, for the person reading the bar, blocked.
+ *
+ *  Everything finer (error, disconnected, stopped) still lives in the pane
+ *  badge and the agent overview; folding those in here would trade a glanceable
  *  signal for a legend nobody reads.
  *
  *  'starting' counts as active: it means the CLI is booting and about to move,
  *  so the seconds right after a spawn should not read as "nothing happening".
  */
-export type TabRunState = 'active' | 'idle' | 'empty'
+export type TabRunState = 'awaiting' | 'active' | 'idle' | 'empty'
+
+/** A pane that has stopped and will not move until someone answers it. Ranked
+ *  above the active statuses, so one blocked pane is visible through a tab full
+ *  of busy ones. Matches rollupPaneStatus's attention order, which puts
+ *  awaiting first for the same reason. */
+const AWAITING = 'awaiting'
 
 /** Statuses that mean the pane is doing something on its own. Everything else
- *  — idle, awaiting, stopped, exited, error, disconnected — means it will not
- *  move until someone acts. */
+ *  — idle, stopped, exited, error, disconnected — means it will not move until
+ *  someone acts. */
 const ACTIVE_STATUSES: ReadonlySet<string> = new Set(['running', 'starting'])
 
 /** Panes that exist in the list but have no terminal yet (cold-restore
@@ -23,11 +33,14 @@ const UNREALIZED = 'waiting'
 
 export function rollupTabStatus(statuses: readonly string[]): TabRunState {
   let realized = false
+  let active = false
   for (const status of statuses) {
     if (status === UNREALIZED) continue
     realized = true
-    if (ACTIVE_STATUSES.has(status)) return 'active'
+    if (status === AWAITING) return 'awaiting'
+    if (ACTIVE_STATUSES.has(status)) active = true
   }
+  if (active) return 'active'
   return realized ? 'idle' : 'empty'
 }
 
@@ -35,7 +48,7 @@ export function rollupTabStatus(statuses: readonly string[]): TabRunState {
  *  paneStatusLabelKey, so each caller resolves it in its own $t scope.
  *
  *  The dot was the one thing on a group row with no words attached to it:
- *  three colours and nothing anywhere that said what they meant. */
+ *  colours and nothing anywhere that said what they meant. */
 export function runGroupStateLabelKey(state: TabRunState): string {
   return `label.run-group-${state}`
 }

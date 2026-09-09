@@ -51,6 +51,19 @@ const statusClass = computed(() => {
   }
 })
 
+// The header used to interpolate the backend's raw status word, so a zh-TW UI
+// read "後端 connected". Every BackendStatus gets its own key instead.
+const BACKEND_STATE_KEYS: Record<string, string> = {
+  starting: 'label.backend-state-starting',
+  connecting: 'label.backend-state-connecting',
+  connected: 'label.backend-state-connected',
+  disconnected: 'label.backend-state-disconnected',
+  error: 'label.backend-state-error',
+}
+const backendStatusLabel = computed(
+  () => t(BACKEND_STATE_KEYS[backend.status.value] ?? 'label.backend-state-error')
+)
+
 // Esc is owned by the host's `workbench.action.closeModal` stack — a listener
 // here would be dead code behind the capture-phase keybinding dispatcher. The
 // host calls this first so a nested confirm dialog closes before the modal.
@@ -100,6 +113,8 @@ const sImporting = ref(false)
 const sAddingSlot = ref(false)
 const sEditingSlotIndex = ref<number | null>(null)
 const sSlotDraft = ref<StageSlot>({ agentKey: 'claude', roleKey: '', label: '', kickoffBody: '', isCommander: false })
+
+const plCount = computed(() => pipelinesApi.pipelines.value.length)
 
 const plCurrentPipeline = computed(
   () => pipelinesApi.pipelines.value.find((p) => p.id === plEditingId.value) ?? null
@@ -704,7 +719,7 @@ function buildAiContext(): string {
       </nav>
       <div class="meta">
         <span class="dot" :class="statusClass"></span>
-        <span>{{ $t('label.backend-status', { status: backend.status.value }) }}</span>
+        <span>{{ $t('label.backend-status', { status: backendStatusLabel }) }}</span>
       </div>
       <button class="pm-close" :title="$t('action.close-esc')" @click="emit('close')">✕</button>
     </header>
@@ -718,6 +733,7 @@ function buildAiContext(): string {
         <div class="toolbar">
           <button class="ghost" :disabled="plBusy" @click="plCreating = !plCreating">{{ $t('action.new-pipeline') }}</button>
           <span v-if="plSummary" class="summary-ok">{{ plSummary }}</span>
+          <span v-if="plCount" class="pl-count">{{ $t('label.pipeline-count', { count: plCount }) }}</span>
         </div>
         <div v-if="plCreating" class="pl-create-row">
           <input
@@ -727,23 +743,60 @@ function buildAiContext(): string {
           <button class="ghost" :disabled="!plNewName.trim() || plBusy" @click="plCreate">{{ $t('action.create') }}</button>
           <button class="ghost" @click="plCreating = false; plNewName = ''">{{ $t('action.cancel') }}</button>
         </div>
-        <ul v-if="pipelinesApi.pipelines.value.length" class="pl-list">
+        <!-- Four grid cells per row, and the two optional ones (badges, reset)
+             live inside always-rendered wrappers — that is what keeps the
+             actions column at a fixed width instead of drifting per row. -->
+        <ul v-if="plCount" class="pl-list">
           <li
             v-for="p in pipelinesApi.pipelines.value" :key="p.id"
             class="pl-item" :class="{ 'pl-active': p.id === pipelinesApi.activePipelineId.value }"
-            role="button"
-            @click="plEnterDetail(p.id)">
+            role="button" tabindex="0"
+            :aria-label="$t('action.open-pipeline-named', { name: p.name })"
+            @click="plEnterDetail(p.id)"
+            @keydown.enter.prevent="plEnterDetail(p.id)"
+            @keydown.space.prevent="plEnterDetail(p.id)">
             <span class="pl-name">{{ p.name }}</span>
+            <span class="pl-tags">
+              <span v-if="p.id === pipelinesApi.activePipelineId.value" class="pl-badge">{{ $t('label.default') }}</span>
+              <span v-if="p.builtin" class="pl-badge pl-badge--builtin">{{ $t('label.builtin') }}</span>
+            </span>
             <span class="pl-meta">{{ $t('label.stage-count', { count: p.stage_count }) }}</span>
-            <span v-if="p.id === pipelinesApi.activePipelineId.value" class="pl-badge">{{ $t('label.default') }}</span>
-            <button
-              v-if="p.builtin" class="icon-btn" :disabled="plBusy"
-              :title="$t('action.reset-factory-stages')"
-              @click.stop="plResetBuiltin(p)">↺</button>
-            <span class="pl-enter">›</span>
+            <span class="pl-actions">
+              <button
+                v-if="p.builtin" class="icon-btn" :disabled="plBusy"
+                :title="$t('action.reset-factory-stages')" :aria-label="$t('action.reset-factory-stages')"
+                @click.stop="plResetBuiltin(p)">↺</button>
+              <span class="pl-enter" :title="$t('action.open-pipeline')" aria-hidden="true">›</span>
+            </span>
           </li>
         </ul>
-        <p v-else class="hint nv-empty nv-empty--inline">{{ $t('label.no-pipelines') }}</p>
+        <!-- The backend ships two builtin pipelines, so an empty list means
+             "could not read them", not "none exist" — hence three states. -->
+        <p v-else-if="pipelinesApi.loading.value" class="pl-state nv-loading nv-loading--inline">
+          {{ $t('label.loading-pipelines') }}
+        </p>
+        <div v-else-if="pipelinesApi.error.value" class="pl-state pl-empty">
+          <p class="pl-empty-title">{{ $t('label.pipelines-unreadable') }}</p>
+          <p class="pl-empty-body">{{ $t('hint.pipelines-unreadable') }}</p>
+          <div class="pl-empty-actions">
+            <button class="ghost pl-retry" :disabled="pipelinesApi.loading.value" @click="pipelinesApi.refresh()">
+              {{ $t('action.retry') }}
+            </button>
+          </div>
+        </div>
+        <div v-else class="pl-state pl-empty">
+          <p class="pl-empty-title">{{ $t('label.pipelines-empty') }}</p>
+          <p class="pl-empty-body">{{ $t('hint.pipelines-empty') }}</p>
+          <div class="pl-empty-actions">
+            <button class="ghost pl-empty-create" :disabled="plBusy" @click="plCreating = true">
+              {{ $t('action.new-pipeline') }}
+            </button>
+          </div>
+        </div>
+        <div v-if="pipelinesApi.pipelinesPath.value" class="pl-source">
+          <span>{{ $t('label.pipeline-definition-file') }}</span>
+          <span class="pl-source-path" :title="pipelinesApi.pipelinesPath.value">{{ pipelinesApi.pipelinesPath.value }}</span>
+        </div>
       </template>
 
       <!-- Detail view: pipeline header + stage editor -->
@@ -1084,11 +1137,14 @@ function buildAiContext(): string {
   background: var(--bg-muted);
   color: var(--text-bright);
 }
+/* Surface ladder, matching SettingsModal: chrome = --bg-base, content cards =
+   --bg-subtle, deepest well = --bg-inset. This body used to be --bg-inset,
+   one step darker than the rest of the modal family. */
 .app {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--bg-inset);
+  background: var(--bg-base);
   color: var(--text-bright);
   font-family: var(--font-ui);
   font-size: var(--font-sm);
@@ -1194,55 +1250,145 @@ function buildAiContext(): string {
 .pl-input {
   flex: 0 1 260px;
 }
+.pl-count {
+  margin-left: auto;
+  font-size: var(--font-2xs);
+  color: var(--text-muted);
+}
+/* SettingsCard shape: content card on --bg-subtle inside a --border-default
+   frame, so the rows read as one block instead of floating on the chrome. */
 .pl-list {
   list-style: none;
   margin: 0 16px;
   padding: 0;
   overflow-y: auto;
-  border: 1px solid var(--border-muted);
-  border-radius: 6px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
 }
+/* Grid, not flex: name | badges | stage count | actions. The two optional
+   cells used to shift the right edge row by row. */
 .pl-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 88px 52px;
+  gap: 12px;
   align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--bg-subtle);
+  min-height: 44px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-muted);
   cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out);
 }
 .pl-item:last-child {
   border-bottom: none;
 }
+/* Translucent mix, so the row separator survives the hover. */
 .pl-item:hover {
-  background: var(--bg-subtle);
+  background: var(--bg-hover);
 }
+/* Quiet fill plus a locator rail — selection is not carried by colour alone. */
 .pl-item.pl-active {
-  background: var(--accent-subtle);
+  background: var(--bg-selected);
+  box-shadow: inset 3px 0 0 var(--accent-emphasis);
 }
 .pl-name {
   font-weight: 600;
-  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.pl-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
 .pl-meta {
   font-size: var(--font-2xs);
   color: var(--text-secondary);
-  flex-shrink: 0;
+  text-align: right;
 }
+.pl-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+/* Accent, not success: "this is the default pipeline" is neither a completion
+   nor a run, and green here collided with the header's connection dot. */
 .pl-badge {
   font-size: var(--font-3xs);
-  color: var(--success-fg);
-  background: var(--success-subtle);
-  border: 1px solid color-mix(in srgb, var(--success-strong) 33%, transparent);
-  border-radius: 3px;
+  font-weight: 600;
+  color: var(--accent-bright);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-muted);
+  border-radius: var(--radius-xs);
   padding: 1px 5px;
   white-space: nowrap;
+}
+.pl-badge--builtin {
+  color: var(--text-secondary);
+  background: var(--bg-muted);
+  border-color: var(--border-default);
 }
 .pl-enter {
   color: var(--text-muted);
   font-size: var(--font-md);
+  line-height: 1;
+}
+.pl-state {
+  margin: 0 16px;
+  flex-shrink: 0;
+}
+.pl-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 28px 20px;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  text-align: center;
+}
+.pl-empty-title {
+  margin: 0;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.pl-empty-body {
+  margin: 0;
+  max-width: 46ch;
+  font-size: var(--font-2xs);
+  color: var(--text-secondary);
+  line-height: var(--lh-base);
+}
+.pl-empty-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+/* "Show where the data lives", the same affordance SettingsModal's meta row
+   gives every tab. pipelinesPath was already fetched and never displayed. */
+.pl-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-shrink: 0;
+  margin: 8px 16px 0;
+  padding: 6px 0 8px;
+  font-size: var(--font-2xs);
+  color: var(--text-secondary);
+}
+.pl-source-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
 }
 
 /* ── Pipeline detail header ───────────────────────────────────────────────── */
@@ -1263,7 +1409,7 @@ function buildAiContext(): string {
 }
 .pl-detail-title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--font-row-title);
   font-weight: 600;
   color: var(--accent-bright);
   display: flex;
@@ -1351,7 +1497,7 @@ function buildAiContext(): string {
 }
 .detail-head h3 {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--font-row-title);
 }
 .row-g {
   display: flex;
@@ -1371,14 +1517,14 @@ function buildAiContext(): string {
   color: var(--accent-bright);
   background: var(--bg-muted);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .badge {
   background: var(--bg-muted);
   color: var(--text-secondary);
-  font-size: 9px;
+  font-size: var(--font-3xs);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
 }
 .item-label {
   font-weight: 600;
@@ -1422,7 +1568,7 @@ textarea {
   border: 1px solid var(--border-default);
   color: var(--text-bright);
   padding: 8px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-family: inherit;
   font-size: var(--font-sm);
   box-sizing: border-box;
@@ -1482,14 +1628,19 @@ button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
+/* The family primary is accent blue (.nv-btn--primary). This override cannot
+   simply be deleted: scoping raises the bare `button` rule above to
+   `button[data-v-x]` (0,1,1), which outranks `.nv-btn--primary` (0,1,0) and
+   would repaint these buttons grey. So it stays, pointing at accent tokens. */
 button.primary {
-  background: var(--success-emphasis);
-  border-color: var(--success-strong);
+  background: var(--accent-emphasis);
+  border-color: var(--accent-emphasis);
   color: var(--text-on-emphasis);
   font-weight: 600;
 }
 button.primary:not(:disabled):hover {
-  background: var(--success-strong);
+  background: var(--accent-focus);
+  border-color: var(--accent-focus);
 }
 button.danger {
   background: var(--danger-deep);
@@ -1509,14 +1660,25 @@ button.small {
   font-size: var(--font-2xs);
   padding: 4px 10px;
 }
+/* 24px square: the house click target (--icon-btn-md). It used to be
+   `padding: 2px 4px`, far under the minimum. */
 .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: var(--icon-btn-md);
+  height: var(--icon-btn-md);
   border: none;
   background: transparent;
   color: var(--text-secondary);
   font-size: var(--font-2xs);
-  padding: 2px 4px;
+  padding: 0;
   cursor: pointer;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
 }
 .icon-btn:hover:not(:disabled) {
   background: var(--bg-muted);
@@ -1537,7 +1699,7 @@ button.small {
 .slots-section {
   margin-top: 8px;
   border: 1px solid var(--border-muted);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
@@ -1552,7 +1714,7 @@ button.small {
 .slot-item {
   background: var(--bg-subtle);
   border: 1px solid var(--border-muted);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 8px 10px;
   cursor: pointer;
 }
@@ -1561,7 +1723,7 @@ button.small {
 }
 .slot-form {
   border: 1px solid var(--border-default);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 10px;
   background: var(--bg-base);
   display: flex;
@@ -1625,13 +1787,13 @@ button.small {
 .modal-card {
   background: var(--bg-base);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 20px 22px;
   max-width: 460px;
 }
 .modal-card h3 {
   margin: 0 0 10px;
-  font-size: 15px;
+  font-size: var(--font-row-title);
 }
 .modal-card p {
   font-size: var(--font-xs);

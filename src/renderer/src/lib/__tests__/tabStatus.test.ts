@@ -1,5 +1,6 @@
 // rollupTabStatus — one dot per StageTabBar tab, rolled up from the statuses of
-// the panes in that tab. Two colours by design: "is anything moving here?"
+// the panes in that tab. Three colours by design: "is anything here waiting on
+// me, and failing that, is anything moving?"
 // Every case below is a rule the UI depends on, so a change in the vocabulary
 // (a new DisplayStatus, say) fails here rather than silently reading as idle.
 import { describe, expect, it } from 'vitest'
@@ -27,13 +28,28 @@ describe('rollupTabStatus', () => {
   })
 
   it.each([
-    ['awaiting'],
     ['stopped'],
     ['exited'],
     ['error'],
     ['disconnected'],
   ])('reports idle for a tab whose panes are all %s — none of them will move on their own', (status) => {
     expect(rollupTabStatus([status, status])).toBe('idle')
+  })
+
+  // The rule this file exists to protect: a tab full of busy panes must still
+  // say so when one of them is blocked on a permission prompt. Short-circuiting
+  // on 'running' hid exactly that case, which is the one worth walking over to.
+  it('reports awaiting when any pane is blocked, even beside a running one', () => {
+    expect(rollupTabStatus(['running', 'awaiting', 'running'])).toBe('awaiting')
+    expect(rollupTabStatus(['starting', 'awaiting'])).toBe('awaiting')
+  })
+
+  it('reports awaiting when every pane is awaiting — not idle', () => {
+    expect(rollupTabStatus(['awaiting', 'awaiting'])).toBe('awaiting')
+  })
+
+  it('ignores unrealized placeholders when ranking awaiting', () => {
+    expect(rollupTabStatus(['waiting', 'awaiting'])).toBe('awaiting')
   })
 
   it('lets a realized pane outweigh unrealized placeholders', () => {

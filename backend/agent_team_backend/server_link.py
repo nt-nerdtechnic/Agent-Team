@@ -40,16 +40,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import json
 import logging
 import os
 import platform
 import secrets
+import ssl
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+import certifi
 import websockets
 
 from . import (
@@ -481,6 +484,65 @@ async def _quiet(task: asyncio.Task) -> None:
         await task
 
 
+@functools.lru_cache(maxsize=1)
+def _tls_context() -> ssl.SSLContext:
+    """Trust roots a frozen build can actually find, *added to* the usual ones.
+
+    ``ssl.create_default_context()`` looks for roots at OpenSSL's compiled-in
+    paths, and PyInstaller freezes the *build* machine's paths into the
+    executable — paths that do not exist on the user's machine. So every
+    ``wss://`` dial from a packaged backend failed the handshake with
+    CERTIFICATE_VERIFY_FAILED, which ``ws_handlers`` flattens into LINK_OFFLINE
+    and the account modal renders as "Cannot reach the server": a TLS trust
+    problem wearing a network outage's clothes, on an install where the link
+    could never work.
+
+    certifi's bundle ships inside the executable and resolves its path at run
+    time, so it is the store that is correct when frozen. It is loaded *on top
+    of* the default set rather than replacing it, because replacing it would
+    trade this bug for its mirror image: someone behind a corporate TLS proxy,
+    or with a private root in their Keychain, running from source — connecting
+    today, and told "Cannot reach the server" tomorrow by the very fix. httpx
+    resolves the same question the same way for every other outbound call this
+    process makes (``httpx/_config.py``: SSL_CERT_FILE, else certifi), so the
+    two paths agree on what is trusted.
+    """
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
+
+
+def _dial(url: str, **kwargs: Any) -> Any:
+    """``websockets.connect`` with that trust store attached for TLS dials.
+
+    Synchronous, and free once ``_warm_tls`` has run: the cache turns this into
+    a dict lookup. Call that first from anywhere on the event loop.
+    """
+    if url.lower().startswith("wss://"):
+        kwargs.setdefault("ssl", _tls_context())
+    return websockets.connect(url, **kwargs)
+
+
+async def _warm_tls(url: str) -> None:
+    """Build the trust store on a worker thread, before anything dials.
+
+    Reading and parsing certifi's bundle is 200-500ms of blocking work, and the
+    loop it would block is the one carrying every terminal's output — the same
+    reason this module offloads Keychain reads and signing. Doing it here keeps
+    ``_dial`` synchronous, so an injected connector still sees the plain
+    call signature the tests build against.
+
+    On the same clock as the dial it precedes: ``to_thread`` hands this to the
+    shared executor, and a starved executor is a failure this repo has had
+    before. Without the timeout the link would sit in STATE_CONNECTING for ever
+    — never dialling, never retrying, never reporting — where every other way
+    this can fail lands in ``_run``'s backoff.
+    """
+    if url.lower().startswith("wss://"):
+        async with asyncio.timeout(DIAL_TIMEOUT_S):
+            await asyncio.to_thread(_tls_context)
+
+
 class ServerLink:
     """One outbound connection: authenticate, then keep the roster published."""
 
@@ -492,7 +554,7 @@ class ServerLink:
         token_clearer: Callable[[], None] | None = None,
         device_name: str | None = None,
     ) -> None:
-        self._connect = connect or websockets.connect
+        self._connect = connect or _dial
         self._load_config = config_loader or load_config
         self._clear_token = token_clearer or (lambda: set_access_token(None))
         self._device_name = device_name or platform.node() or "unknown"
@@ -756,6 +818,7 @@ class ServerLink:
     async def _session(self, config: ServerLinkConfig) -> bool:
         """One connection, from dial to close. Returns whether it authenticated."""
         authenticated = False
+        await _warm_tls(config.url)
         async with self._connect(config.url) as ws:
             self._ws = ws
             reader = asyncio.create_task(self._read_loop(ws))
@@ -3306,8 +3369,9 @@ async def account_request(
     if not target:
         raise ConnectionError("no server url configured")
     # Honour a test's injected connector when one is installed on the link.
-    connect = _link._connect if _link is not None else websockets.connect
+    connect = _link._connect if _link is not None else _dial
     frame = json.dumps({"id": "acct-1", "type": msg_type, "payload": payload})
+    await _warm_tls(target)
     async with connect(target) as ws:
         await asyncio.wait_for(ws.send(frame), REQUEST_TIMEOUT_S)
         while True:

@@ -29,7 +29,7 @@ const row = (over: Record<string, unknown> = {}) => ({
   displayPath: '~/Desktop/Agent-Team',
   isCurrent: true,
   collapsed: false,
-  count: 3,
+  count: 3, paneIds: [],
   lineage: [],
   remote: [],
   ...over
@@ -50,7 +50,7 @@ const grouped = () => row({
 
 /** A workspace nobody has grouped: one bare section, no heading. */
 const ungrouped = () => row({
-  count: 1,
+  count: 1, paneIds: [],
   groups: [{ id: '', name: '', rows: [{ id: 'p1', depth: 0, hasChildren: false, collapsed: false }] }]
 })
 

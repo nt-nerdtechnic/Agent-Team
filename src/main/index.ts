@@ -888,19 +888,28 @@ function retryGitV2AfterRecovery(): { ok: boolean; reason?: string } {
   if (gitRecoveryForced) return { ok: false, reason: 'NAVIDE_GIT_RECOVERY=legacy is forcing legacy recovery' }
   if (pluginFactoryOptOuts.has('navide.git')) return { ok: false, reason: 'factory package is opted out' }
   if (gitV2RetriesLeft <= 0) return { ok: false, reason: 'no v2 attempt left this session' }
-  gitV2RetriesLeft -= 1
   const restored = activateFactoryGitPackage()
   if (!restored.loaded) {
-    warnMain(`[main] navide.git v2 retry failed: ${restored.reason}`)
+    // Only an attempt that actually failed costs budget. Spending it up front
+    // meant a restore that worked still burned one, so two downgrades — even
+    // two spurious ones — stranded the session on legacy until a restart.
+    gitV2RetriesLeft -= 1
+    warnMain(`[main] navide.git v2 retry failed: ${restored.reason}; ${gitV2RetriesLeft} retry left`)
     return { ok: false, reason: restored.reason }
   }
   gitRecoveryEnabled = false
+  // v2 is running again, so the budget has served its purpose. A later,
+  // unrelated downgrade starts from a full budget rather than inheriting the
+  // cost of one that was already recovered from.
+  gitV2RetriesLeft = GIT_V2_RECOVERY_RETRIES
   applyPluginActivationChange({ pluginId: 'navide.git', activation: restored.activation })
   for (const hostWindow of mainWindows) {
     if (hostWindow.isDestroyed() || detachedWindowIds.has(hostWindow.id)) continue
     hostWindow.webContents.send('git:recoveryChanged', { legacy: false })
   }
-  warnMain(`[main] navide.git v2 restored after legacy recovery; ${gitV2RetriesLeft} retry left`)
+  warnMain(
+    `[main] navide.git v2 restored after legacy recovery; retry budget reset to ${gitV2RetriesLeft}`
+  )
   return { ok: true }
 }
 ipcMain.handle('git:retryV2', (event) => {

@@ -5,6 +5,11 @@ description = "Python backend for the Navide AI-native engineering environment"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.40",
+    # Trust roots for the outbound Navide-Server link (server_link.py imports
+    # it directly). Transitive via httpx/anthropic already, but a frozen build
+    # has no other CA store it can find, so its presence must not be a side
+    # effect of somebody else's dependency tree.
+    "certifi",
     "chardet>=7.4.3",
     "fastapi>=0.115",
     "mammoth>=1.12.0",

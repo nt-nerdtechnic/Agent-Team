@@ -14,6 +14,7 @@ import {
   groupHistory,
   historyCleanupCutoffIso,
   historyEntryLabel,
+  isHistoryEntryRemoved,
   type HistoryCleanupMode,
   type HistoryGroupKey,
   type HistoryDeletePreview,
@@ -22,6 +23,7 @@ import {
   type HistoryStatusFilter,
   type SpawnHistoryEntry,
 } from '../lib/spawnHistory'
+import BrandLoader from './BrandLoader.vue'
 
 // Agent History modal, extracted from App.vue. Owns only presentation-local
 // state (search query, filters, selection, kill-all confirmation). Flows that
@@ -51,6 +53,8 @@ const props = defineProps<{
   fetchHistoryLog?: (entry: SpawnHistoryEntry) => Promise<{ title: string; content: string } | null>
   searchHistoryLogContent?: (entries: SpawnHistoryEntry[], query: string) => Promise<Set<string>>
   previewDelete?: (target: HistoryDeleteTarget) => Promise<HistoryDeletePreview | null>
+  /** True while App is re-reading this workspace's history from the backend. */
+  refreshing?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -64,6 +68,7 @@ const emit = defineEmits<{
   (e: 'delete', entry: SpawnHistoryEntry): void
   (e: 'cleanup', mode: HistoryCleanupMode, cutoffIso: string): void
   (e: 'toggle-star', entry: SpawnHistoryEntry, starred: boolean): void
+  (e: 'refresh'): void
 }>()
 
 const agentSpecs = AGENT_SPECS
@@ -84,6 +89,31 @@ const starredOnly = ref(false)
 const selectedPaneId = ref('')
 const confirmKillAll = ref(false)
 const loadingMore = ref(false)
+
+// The list is swapped for the brand loader only once a refresh has been
+// running long enough to be worth showing — the same 180ms arming the
+// workspace-switch cover uses, and for the same reason: a reload that lands in
+// a frame or two would otherwise flash the list away and back.
+const REFRESH_LOADER_ARM_MS = 180
+const refreshLoaderArmed = ref(false)
+let refreshLoaderTimer: number | undefined
+
+watch(() => props.refreshing, (busy) => {
+  if (refreshLoaderTimer !== undefined) {
+    window.clearTimeout(refreshLoaderTimer)
+    refreshLoaderTimer = undefined
+  }
+  if (!busy) {
+    refreshLoaderArmed.value = false
+    return
+  }
+  refreshLoaderTimer = window.setTimeout(() => {
+    refreshLoaderTimer = undefined
+    refreshLoaderArmed.value = true
+  }, REFRESH_LOADER_ARM_MS)
+})
+
+const showRefreshLoader = computed(() => !!props.refreshing && refreshLoaderArmed.value)
 
 // Phase E per-entry actions: inline rename, copy session id, single delete,
 // and the bulk cleanup dropdown. All presentation-local; the persistence
@@ -286,6 +316,16 @@ function formatTimestamp(iso?: string): string {
   if (!iso) return '—'
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString()
+}
+
+/** The detail row names the actual spawner, all three of them. The origin
+ *  dropdown deliberately still folds mcp into 'manual' (it filters on "not a
+ *  pipeline pane"); this is the one place that has to be exact, because it is
+ *  answering "where did this session come from?". */
+function originLabelKey(origin: SpawnHistoryEntry['origin']): string {
+  if (origin === 'pipeline') return 'label.history-filter-pipeline'
+  if (origin === 'mcp') return 'label.history-filter-mcp'
+  return 'label.history-filter-manual'
 }
 
 function listTime(entry: SpawnHistoryEntry, groupKey: HistoryGroupKey): string {
@@ -594,6 +634,15 @@ async function copyLogText(): Promise<void> {
               @click="confirmKillAll = true"
               :title="$t('action.kill-all-agents')"
             >🗑 {{ $t('action.kill-all') }}</button>
+            <!-- The list is a snapshot taken when the modal opened; a pane
+                 closed since then only shows up after another read. -->
+            <button
+              class="ah-refresh-btn"
+              :disabled="refreshing"
+              :title="$t('action.refresh')"
+              :aria-label="$t('action.refresh')"
+              @click="emit('refresh')"
+            >⟳</button>
             <div class="ah-cleanup-wrap">
               <button class="ah-cleanup-btn" @click="toggleCleanupMenu">🧹 {{ $t('action.cleanup') }} ▾</button>
               <template v-if="cleanupMenuOpen">
@@ -657,45 +706,52 @@ async function copyLogText(): Promise<void> {
               </div>
             </div>
             <div class="agent-history-list">
-              <div v-if="sessionHistory.length === 0" class="agent-history-empty">{{ $t('label.no-history-yet') }}</div>
-              <div v-else-if="filteredSessionHistory.length === 0" class="agent-history-empty">
-                {{ $t('label.no-matching-history') }}
+              <!-- Replaces the list rather than covering it: an overlay over
+                   the empty-state text puts two answers on screen at once. -->
+              <div v-if="showRefreshLoader" class="ah-refresh-loading">
+                <BrandLoader :size="56" :label="$t('action.refresh')" />
               </div>
-              <template v-for="group in groupedHistory" :key="group.key">
-                <div class="ah-group-title" :class="{ running: group.key === 'active' }">
-                  {{ $t(`label.history-group-${group.key}`) }}
+              <template v-else>
+                <div v-if="sessionHistory.length === 0" class="agent-history-empty">{{ $t('label.no-history-yet') }}</div>
+                <div v-else-if="filteredSessionHistory.length === 0" class="agent-history-empty">
+                  {{ $t('label.no-matching-history') }}
                 </div>
+                <template v-for="group in groupedHistory" :key="group.key">
+                  <div class="ah-group-title" :class="{ running: group.key === 'active' }">
+                    {{ $t(`label.history-group-${group.key}`) }}
+                  </div>
+                  <button
+                    v-for="entry in group.entries"
+                    :key="entry.paneId"
+                    class="agent-history-row"
+                    :class="{ selected: entry.paneId === selectedPaneId }"
+                    @click="selectedPaneId = entry.paneId"
+                    @dblclick="!isHistoryEntryRemoved(entry) && emit('focus-pane', entry)"
+                  >
+                    <span class="ah-dot" :class="isHistoryEntryRemoved(entry) ? 'removed' : 'active'"></span>
+                    <span class="ah-badge">{{ historyEntryLabel(entry) }}</span>
+                    <span class="ah-time">{{ listTime(entry, group.key) }}</span>
+                    <!-- span, not button: rows are <button> and nesting
+                         interactive elements is invalid HTML. -->
+                    <span
+                      class="ah-row-star"
+                      :class="{ starred: entry.starred }"
+                      role="button"
+                      tabindex="0"
+                      :title="entry.starred ? $t('action.unstar') : $t('action.star')"
+                      @click.stop="emit('toggle-star', entry, !entry.starred)"
+                      @keydown.enter.prevent.stop="emit('toggle-star', entry, !entry.starred)"
+                      @keydown.space.prevent.stop="emit('toggle-star', entry, !entry.starred)"
+                    >{{ entry.starred ? '★' : '☆' }}</span>
+                  </button>
+                </template>
                 <button
-                  v-for="entry in group.entries"
-                  :key="entry.paneId"
-                  class="agent-history-row"
-                  :class="{ selected: entry.paneId === selectedPaneId }"
-                  @click="selectedPaneId = entry.paneId"
-                  @dblclick="!entry.removedAt && emit('focus-pane', entry)"
-                >
-                  <span class="ah-dot" :class="entry.removedAt ? 'removed' : 'active'"></span>
-                  <span class="ah-badge">{{ historyEntryLabel(entry) }}</span>
-                  <span class="ah-time">{{ listTime(entry, group.key) }}</span>
-                  <!-- span, not button: rows are <button> and nesting
-                       interactive elements is invalid HTML. -->
-                  <span
-                    class="ah-row-star"
-                    :class="{ starred: entry.starred }"
-                    role="button"
-                    tabindex="0"
-                    :title="entry.starred ? $t('action.unstar') : $t('action.star')"
-                    @click.stop="emit('toggle-star', entry, !entry.starred)"
-                    @keydown.enter.prevent.stop="emit('toggle-star', entry, !entry.starred)"
-                    @keydown.space.prevent.stop="emit('toggle-star', entry, !entry.starred)"
-                  >{{ entry.starred ? '★' : '☆' }}</span>
-                </button>
+                  v-if="historyHasMore && filteredSessionHistory.length > 0"
+                  class="ah-load-more"
+                  :disabled="loadingMore"
+                  @click="onLoadMore"
+                >{{ loadingMore ? $t('label.loading') : $t('label.load-more') }}</button>
               </template>
-              <button
-                v-if="historyHasMore && filteredSessionHistory.length > 0"
-                class="ah-load-more"
-                :disabled="loadingMore"
-                @click="onLoadMore"
-              >{{ loadingMore ? $t('label.loading') : $t('label.load-more') }}</button>
             </div>
           </div>
           <div class="history-detail-col">
@@ -724,8 +780,8 @@ async function copyLogText(): Promise<void> {
                   @keydown="onRenameKeydown"
                   @blur="renameEditing = false"
                 />
-                <span class="ah-status" :class="selectedEntry.removedAt ? 'removed' : 'active'">
-                  {{ selectedEntry.removedAt ? $t('label.history-filter-removed') : $t('label.history-filter-active') }}
+                <span class="ah-status" :class="isHistoryEntryRemoved(selectedEntry) ? 'removed' : 'active'">
+                  {{ isHistoryEntryRemoved(selectedEntry) ? $t('label.history-filter-removed') : $t('label.history-filter-active') }}
                 </span>
               </div>
               <div class="detail-grid">
@@ -736,10 +792,10 @@ async function copyLogText(): Promise<void> {
                 <span class="detail-label">{{ $t('label.history-detail-role') }}</span>
                 <span class="detail-value">{{ selectedEntry.roleLabel || '—' }}</span>
                 <span class="detail-label">{{ $t('label.history-detail-origin') }}</span>
-                <span class="detail-value">{{ selectedEntry.origin === 'pipeline' ? $t('label.history-filter-pipeline') : $t('label.history-filter-manual') }}</span>
+                <span class="detail-value">{{ $t(originLabelKey(selectedEntry.origin)) }}</span>
                 <span class="detail-label">{{ $t('label.history-detail-spawned') }}</span>
                 <span class="detail-value">{{ formatTimestamp(selectedEntry.spawnedAt) }}</span>
-                <template v-if="selectedEntry.removedAt">
+                <template v-if="isHistoryEntryRemoved(selectedEntry)">
                   <span class="detail-label">{{ $t('label.history-detail-removed') }}</span>
                   <span class="detail-value">{{ formatTimestamp(selectedEntry.removedAt) }}</span>
                 </template>
@@ -770,7 +826,7 @@ async function copyLogText(): Promise<void> {
                 </template>
               </div>
               <div class="agent-history-actions">
-                <template v-if="selectedEntry.removedAt">
+                <template v-if="isHistoryEntryRemoved(selectedEntry)">
                   <span
                     v-if="unavailablePaneIds.has(selectedEntry.paneId)"
                     class="ah-session-unavailable"
@@ -798,7 +854,7 @@ async function copyLogText(): Promise<void> {
                      entries never show it (their pane keeps running, so
                      deleting the record is ambiguous). -->
                 <button
-                  v-if="selectedEntry.removedAt"
+                  v-if="isHistoryEntryRemoved(selectedEntry)"
                   class="ah-revive ah-delete"
                   :disabled="deletePreviewPending"
                   @click="openDeleteConfirm"
@@ -977,6 +1033,7 @@ async function copyLogText(): Promise<void> {
 .ah-load-more:focus-visible,
 .ah-cleanup-btn:focus-visible,
 .ah-cleanup-item:focus-visible,
+.ah-refresh-btn:focus-visible,
 .history-killall:focus-visible,
 .history-close:focus-visible,
 .agent-history-search-clear:focus-visible,
@@ -1445,6 +1502,31 @@ async function copyLogText(): Promise<void> {
   color: var(--success-fg);
   font-size: var(--font-3xs);
   font-weight: 600;
+}
+.ah-refresh-btn {
+  background: transparent;
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  font-size: var(--font-2xs);
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out);
+}
+.ah-refresh-btn:hover:not(:disabled) {
+  color: var(--text-bright);
+  border-color: var(--accent-muted);
+}
+.ah-refresh-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.ah-refresh-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 12px;
 }
 .ah-cleanup-wrap {
   position: relative;

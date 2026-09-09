@@ -140,6 +140,7 @@ const props = defineProps<{
   tabRequest?: number
   confirmBeforeClose?: boolean
   confirmBeforeClosePane?: boolean
+  confirmBeforeCloseWorkspace?: boolean
   /** Global permission-bypass toggle. Owned by App.vue; ControlPane edits the
    *  same ref, so this page mirrors it rather than owning a second copy. */
   yoloEnabled?: boolean
@@ -157,6 +158,7 @@ const emit = defineEmits<{
   (e: 'update:confirmBeforeClose', v: boolean): void
   (e: 'update:yoloEnabled', v: boolean): void
   (e: 'update:confirmBeforeClosePane', v: boolean): void
+  (e: 'update:confirmBeforeCloseWorkspace', v: boolean): void
   (e: 'update:idleReclaimEnabled', v: boolean): void
   (e: 'update:idleReclaimMinutes', v: string): void
   (e: 'reclaim-now'): void
@@ -170,6 +172,13 @@ const confirmBeforeCloseModel = computed({
 const confirmBeforeClosePaneModel = computed({
   get: () => props.confirmBeforeClosePane ?? true,
   set: (v: boolean) => emit('update:confirmBeforeClosePane', v),
+})
+// Likewise for the sidebar's close-workspace dialog. Its own row, because the
+// two dialogs guard different losses: a pane's scrollback, and every pane
+// record in a project.
+const confirmBeforeCloseWorkspaceModel = computed({
+  get: () => props.confirmBeforeCloseWorkspace ?? true,
+  set: (v: boolean) => emit('update:confirmBeforeCloseWorkspace', v),
 })
 // Reclaiming an idle CLI frees the memory it is sitting on and leaves the
 // click-to-resume placeholder behind, so the row reads as a memory setting
@@ -2596,6 +2605,19 @@ watch(activeTab, (tab) => {
                   <ToggleSwitch
                     v-model="confirmBeforeClosePaneModel"
                     :aria-label="$t('settings.general.confirm-close-pane')"
+                  />
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                data-settings-section="general-confirm-close-workspace"
+                :title="$t('settings.general.confirm-close-workspace')"
+                :description="$t('settings.general.confirm-close-workspace-hint')"
+              >
+                <template #control>
+                  <ToggleSwitch
+                    v-model="confirmBeforeCloseWorkspaceModel"
+                    :aria-label="$t('settings.general.confirm-close-workspace')"
                   />
                 </template>
               </SettingRow>

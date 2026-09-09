@@ -263,7 +263,7 @@ import {
   questionActionFor,
 } from './lib/cliAwaitingInput'
 import { markerTurnActionFor } from './lib/sessionMarkerTurn'
-import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
+import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntriesFor, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
 import { executeCommand, initKeybindingsPort, useKeybindings, registerCommand, setContext } from '@navide/plugin-ui/shared'
 import { useUiActionBus } from './composables/useUiActionBus'
 import { releaseAnnouncementId, useAnnouncements } from './composables/useAnnouncements'
@@ -285,6 +285,7 @@ const AccountModal = defineAsyncComponent(loadAccountModal)
 // somebody happened to open a window.
 import PairingPrompt from './components/PairingPrompt.vue'
 import ShutdownOverlay, { type QuitStage } from './components/ShutdownOverlay.vue'
+import BrandLoader from './components/BrandLoader.vue'
 import NavideCloudMark from './components/NavideCloudMark.vue'
 const OnboardingWizard = defineAsyncComponent(() => import('./components/OnboardingWizard.vue'))
 const WhatsNewModal = defineAsyncComponent(() => import('./components/WhatsNewModal.vue'))
@@ -869,6 +870,11 @@ const dontConfirmCloseAgain = ref<boolean>(false)
 // Only the ⌘W path reads this — the ✕ button is a deliberate mouse click and
 // still closes outright. A running pane always asks, setting or not.
 const confirmBeforeClosePane = makeStickyBool('agentTeam.confirmClosePane', true)
+// Confirm before the sidebar's "close workspace" takes its panes down with it.
+// Default ON, and a separate setting from confirmBeforeClose: that one guards
+// returning to the welcome picker, which leaves every pane record intact. This
+// one guards the only action that marks them removed, which no reopen undoes.
+const confirmBeforeCloseWorkspace = makeStickyBool('agentTeam.confirmCloseWorkspace', true)
 // Hand a long-idle CLI's memory back to the machine. Each idle claude holds
 // ~230-330MB it never releases (GPU slabs the process allocates and keeps, see
 // the memory diagnosis) — with a dozen panes open that is most of a 32GB
@@ -1338,29 +1344,6 @@ function spawnHistoryWorkspaceIdentity(workspacePath: string): WorkspaceIdentity
   }
 }
 
-/** Newest first, one row per session (pane id as the fallback key), filtered
- *  to one workspace. Shared by the viewed workspace's live list and another
- *  workspace's read-only copy so the two cannot dedupe differently. */
-function historyEntriesFor(
-  entries: readonly SpawnHistoryEntry[],
-  workspace: WorkspaceIdentity,
-): SpawnHistoryEntry[] {
-  const result: SpawnHistoryEntry[] = []
-  const seen = new Set<string>()
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i]
-    // Display-layer guard: never show another workspace's entries, even if
-    // one slipped into the buffer at runtime.
-    if (!entryBelongsToWorkspace(entry, workspace)) continue
-    const key = entry.sessionId ? `session:${entry.sessionId}` : `pane:${entry.paneId}`
-    if (!seen.has(key)) {
-      seen.add(key)
-      result.push(entry)
-    }
-  }
-  return result
-}
-
 const sessionHistory = computed(() =>
   historyEntriesFor(spawnHistory.value, spawnHistoryWorkspaceIdentity(currentWorkspace.value))
 )
@@ -1559,6 +1542,32 @@ const historyWorkspaceLabel = computed(() =>
     ? (normWs(historyWorkspace.value).split('/').filter(Boolean).pop() ?? '')
     : ''
 )
+
+/** True while the modal's list is being re-read from the backend. */
+const historyRefreshing = ref(false)
+
+/** Re-read the shown workspace's history from the backend.
+ *
+ *  Runs on open as well as from the button: what the modal held until now is
+ *  whatever the last hydrate left in memory, which a pane opened or closed
+ *  since then is not in. */
+async function onRefreshHistory(): Promise<void> {
+  if (historyRefreshing.value) return
+  historyRefreshing.value = true
+  try {
+    if (historyIsForeign.value) {
+      await loadForeignHistory(historyWorkspace.value)
+      return
+    }
+    // The current in-memory copy, deliberately, and never null: hydrate reads
+    // a null `persisted` as "a project that predates the backend store" and
+    // answers it with a one-time migration write. Passing the copy also leaves
+    // the list intact if the backend read fails.
+    await hydrateSpawnHistory(currentWorkspace.value, spawnHistory.value.slice(), undefined)
+  } finally {
+    historyRefreshing.value = false
+  }
+}
 
 function resetForeignHistory(): void {
   historyWorkspace.value = ''
@@ -5796,6 +5805,15 @@ async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boo
   }
   if (!keepInList) {
     panes.value = panes.value.filter((p) => p.id !== paneId)
+    // The ghost banner counts ids, not panes. An id left behind after its pane
+    // is gone keeps "N disconnected" on the status bar for good, and the only
+    // thing you can do with it — the banner's click, openReconnectPicker — looks
+    // the pane up, finds nothing, and returns silently. Cleared only when the
+    // pane really leaves: a rebuild or an idle-reclaim keeps its seat in the
+    // list, and should keep the reconnect offer with it.
+    if (disconnectedPaneIds.value.includes(paneId)) {
+      disconnectedPaneIds.value = disconnectedPaneIds.value.filter((id) => id !== paneId)
+    }
   }
   issueHandoffs.value.forEach((v, k) => {
     if (v.paneId === paneId) issueHandoffs.value.set(k, { ...v, state: 'pane-gone' })
@@ -6879,7 +6897,9 @@ async function onOpenWorkspaceHistory(workspacePath?: string): Promise<void> {
     workspacePath && normWs(workspacePath) !== normWs(currentWorkspace.value) ? workspacePath : ''
   historyWorkspace.value = foreign
   showHistory.value = true
-  if (foreign) await loadForeignHistory(foreign)
+  // One path for both cases: opening is a refresh, so the foreign load runs
+  // under the same busy flag the button uses instead of beside it.
+  await onRefreshHistory()
 }
 
 // Closed from the button, from Esc, or by an action that leaves the modal —
@@ -7126,6 +7146,29 @@ registerCommand('ui.settings.open', (args) => {
   }
 })
 registerCommand('ui.settings.close', () => { showSettings.value = false })
+// The permission-bypass toggle. NOT pipeline state and not workspace state:
+// skipFlagFor() reads it on every spawn / resume / restore path this window
+// has, whichever project they belong to — hence a ui.settings.* name and no
+// entry in WORKSPACE_SCOPED_ACTIONS.
+//
+// The read reports the per-vendor overrides next to the global value because
+// `yolo: true` on its own says nothing about what a given CLI will actually
+// start with: `agentTeam.cliPermission.<agentKey>` can pin one vendor to
+// force-on or force-off, and a vendor with no skipPermissionFlag at all
+// (grok / opencode / pi) never carries one either way. `skipFlag` is the
+// resolved answer for each vendor — '' meaning "starts without the bypass".
+registerCommand('ui.settings.yolo', (args) => {
+  const next = (args as { yolo?: boolean } | undefined)?.yolo
+  if (typeof next === 'boolean') yoloEnabled.value = next
+  return {
+    yolo: yoloEnabled.value,
+    agents: agentSpecs.map((spec) => ({
+      agent: spec.agentKey,
+      mode: parseCliPermissionMode(settingsGet<string | null>(cliPermissionKey(spec.agentKey), null)),
+      skipFlag: skipFlagFor(spec.agentKey, spec),
+    })),
+  }
+})
 registerCommand('ui.pane.create', async (args) => {
   const a = (args as { agent?: string; name?: string; task?: string } | undefined) ?? {}
   if (!a.agent || !currentWorkspace.value) {
@@ -7450,6 +7493,115 @@ registerCommand('ui.pipeline.abort', async () => {
   await onPipelineAbort()
   return { workspacePath: pipeline.workspacePath, state: pipeline.state }
 })
+registerCommand('ui.pipeline.next', async () => {
+  // onPipelineNext returns silently unless a run is in progress. Its other
+  // exit — the final stage — is the COMPLETION path, not an advance, and
+  // ControlPane's Next button is disabled there (pipelineNextStage is null),
+  // so this refuses it too rather than completing a run behind a caller that
+  // asked to step forward.
+  if (pipeline.state !== 'running') {
+    throw new Error(`ui.pipeline.next: no pipeline is running in this workspace (state "${pipeline.state}")`)
+  }
+  const before = pipeline.stageIndex
+  if (before + 1 >= stagesApi.stages.value.length) {
+    throw new Error(
+      `ui.pipeline.next: stage ${before + 1} of ${stagesApi.stages.value.length} is the last one — there is no next stage to advance to`
+    )
+  }
+  await onPipelineNext()
+  // Advancing IS the stageIndex move: onPipelineNext sets it before it
+  // activates the stage. Anything that made the function return early leaves
+  // it where it was, and that must not read as ok.
+  if (pipeline.stageIndex <= before) {
+    throw new Error(
+      `ui.pipeline.next: the run did not advance (still on stage ${pipeline.stageIndex}, state "${pipeline.state}") — see the pipeline log for why`
+    )
+  }
+  return {
+    workspacePath: pipeline.workspacePath,
+    state: pipeline.state,
+    stageIndex: pipeline.stageIndex,
+    stages: stagesApi.stages.value.length,
+  }
+})
+registerCommand('ui.pipeline.resume', async () => {
+  if (!currentWorkspace.value) throw new Error('ui.pipeline.resume requires an open workspace')
+  // Same reason ui.pipeline.start guards a copy: the read after the await must
+  // stay unnarrowed.
+  const before: PipelineRun['state'] = pipeline.state
+  if (before === 'running') {
+    throw new Error('ui.pipeline.resume: a pipeline is already running in this workspace — abort it first')
+  }
+  // onPipelineResume reads the recorded run and returns silently when there is
+  // none, or when it has no stage left. Both are worth naming.
+  const info = existingProject.value
+  if (!info) {
+    throw new Error('ui.pipeline.resume: this workspace has no recorded run to resume')
+  }
+  if (info.nextStageIndex < 0) {
+    throw new Error(
+      `ui.pipeline.resume: the recorded run has no stage left to resume (${info.stagesCompleted}/${info.totalStages} stages done)`
+    )
+  }
+  await onPipelineResume()
+  // Its remaining soft exits (pipeline switch failed, stages failed to load,
+  // the run aborted while restored panes were realized) all leave the state
+  // short of 'running'.
+  const resumed: PipelineRun['state'] = pipeline.state
+  if (resumed !== 'running') {
+    throw new Error(`ui.pipeline.resume: the run did not resume (state "${resumed}") — see the pipeline log for why`)
+  }
+  return {
+    workspacePath: pipeline.workspacePath,
+    state: resumed,
+    stageIndex: pipeline.stageIndex,
+    stages: stagesApi.stages.value.length,
+  }
+})
+registerCommand('ui.pipeline.reset', async () => {
+  // Reset is the destructive one: it kills EVERY pane in the window, manual
+  // panes included, so it needs an open workspace to be the workspace whose
+  // panes go. onPipelineReset has no soft exit of its own — it always lands on
+  // 'idle' — so the check below is a contract test, not a known escape hatch.
+  if (!currentWorkspace.value) throw new Error('ui.pipeline.reset requires an open workspace')
+  await onPipelineReset()
+  const state: PipelineRun['state'] = pipeline.state
+  if (state !== 'idle') {
+    throw new Error(`ui.pipeline.reset: the run was not cleared (state "${state}") — see the pipeline log for why`)
+  }
+  return { workspacePath: currentWorkspace.value, state, stageIndex: pipeline.stageIndex }
+})
+registerCommand('ui.pipeline.restart', async () => {
+  if (!currentWorkspace.value) throw new Error('ui.pipeline.restart requires an open workspace')
+  const before: PipelineRun['state'] = pipeline.state
+  if (before === 'running') {
+    throw new Error('ui.pipeline.restart: a pipeline is already running in this workspace — abort it first')
+  }
+  // Start over re-runs the SAME task from stage 01; it has no task of its own.
+  // ControlPane's Start Over button takes it from the recorded run first and
+  // the live field second, so this reads the same two places rather than
+  // handing onPipelineRestart an empty task the run would then carry.
+  const task = existingProject.value?.taskDescription || pipeline.task
+  if (!task) {
+    throw new Error('ui.pipeline.restart: no previous run to start over from — use ui.pipeline.start with a task')
+  }
+  await onPipelineRestart({ task, workspacePath: currentWorkspace.value })
+  // onPipelineRestart ends in onPipelineStart, so it inherits every one of its
+  // soft refusals (stages not loaded, every stage-01 slot failing to spawn) —
+  // and the panes of the previous attempt are already dead by then, which is
+  // exactly when "ok, nothing happened" is the most misleading answer.
+  const restarted: PipelineRun['state'] = pipeline.state
+  if (restarted !== 'running') {
+    throw new Error(`ui.pipeline.restart: the run did not start (state "${restarted}") — see the pipeline log for why`)
+  }
+  return {
+    pipelineId: pipelinesApi.activePipelineId.value,
+    stages: stagesApi.stages.value.length,
+    workspacePath: pipeline.workspacePath,
+    state: restarted,
+    stageIndex: pipeline.stageIndex,
+  }
+})
 registerCommand('ui.workspace.open', async (args) => {
   const path = (args as { path?: string } | undefined)?.path
   if (!path) throw new Error('ui.workspace.open requires path')
@@ -7613,7 +7765,9 @@ async function resolveHistoryLogPath(
     const found = await api.findManualLog(ws, manualLogFileName(entry.agentKey, entry.paneId))
     logPath = found.ok ? found.path ?? undefined : undefined
   }
-  if (!logPath) logPath = legacyHistoryLogPath(entry, ws)
+  // '' means the reconstruction had nothing to work from (no spawn date);
+  // keep that as "unresolved" rather than letting it fall through as a path.
+  if (!logPath) logPath = legacyHistoryLogPath(entry, ws) || undefined
   return logPath
 }
 
@@ -7839,6 +7993,22 @@ interface ProjectPane {
   collapsed?: boolean
   output_log_file?: string
   stopped?: boolean
+  /** When the pane was opened / closed, as the backend recorded it. Empty on
+   *  every record written before the fields existed, which reads as "the time
+   *  is not known" — never as "now". */
+  spawned_at?: string
+  removed_at?: string
+}
+
+const HISTORY_ORIGINS: readonly SpawnHistoryEntry['origin'][] = ['manual', 'pipeline', 'mcp']
+
+/** The persisted origin, narrowed to the three values a history entry accepts.
+ *  Anything else (an older or newer backend spelling) reads as manual, which
+ *  is what the pre-existing backfill assumed for every record. Membership, not
+ *  equality: comparing against one origin is how mcp panes got mislabelled in
+ *  the first place. */
+function backfillOrigin(origin: string | undefined): SpawnHistoryEntry['origin'] {
+  return HISTORY_ORIGINS.find((known) => known === origin) ?? 'manual'
 }
 
 interface ProjectPayload {
@@ -8723,7 +8893,6 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
     (p) => p.origin !== 'pipeline' && p.spawn_status === 'removed'
   )
   const existingPaneIds = new Set(spawnHistory.value.map((e) => e.paneId))
-  const fallbackTs = payload.project?.updated_at ?? new Date().toISOString()
   const backfilledIds = new Set<string>()
   for (const saved of removedManual) {
     if (existingPaneIds.has(saved.pane_id)) continue
@@ -8738,11 +8907,16 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       roleLabel: roleLabel(saved.role),
       command: saved.command ?? '',
       sessionId: (saved.session_id ?? '').trim() || undefined,
-      origin: 'manual',
+      origin: backfillOrigin(saved.origin),
       stageId: '' as StageId,
       workspacePath,
-      spawnedAt: fallbackTs,
-      removedAt: fallbackTs,
+      // Only what the record actually says. project.updated_at used to stand in
+      // here, and since it is rewritten on every save the whole batch landed on
+      // roughly the app's start time — every past session piled into "today".
+      // An unknown time stays unknown; the list already renders that as '—'.
+      spawnedAt: saved.spawned_at || undefined,
+      removedAt: saved.removed_at || undefined,
+      removedTimeUnknown: !saved.removed_at || undefined,
       outputLogFile: saved.output_log_file || undefined,
     })
     backfilledIds.add(saved.pane_id)
@@ -8778,10 +8952,13 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
             if (!ts) continue
             entry.spawnedAt = ts.first
             entry.removedAt = ts.last
+            // A real removal time supersedes the "removed, time unknown" marker.
+            entry.removedTimeUnknown = undefined
           }
         }
       } catch {
-        // non-fatal — fallback timestamps remain
+        // non-fatal — the entries keep whatever the record itself carried,
+        // including "time unknown"
       }
     })()
   }
@@ -13938,6 +14115,28 @@ async function switchToWorkspace(path: string): Promise<void> {
 async function closeWorkspace(path: string): Promise<void> {
   if (!path) return
   if (!workspaceOrder.value.some((w) => normWs(w) === normWs(path))) return
+  // Ask BEFORE anything is torn down. Closing marks every pane record removed
+  // and restore only brings back 'spawned' ones, so this is the one workspace
+  // action a reopen cannot undo — and the menu row alone does not say so.
+  if (confirmBeforeCloseWorkspace.value) {
+    const count = panes.value.filter((p) => normWs(p.workspacePath) === normWs(path)).length
+    const name = path.split('/').filter(Boolean).pop() || path
+    const ok = await notifyRestore.confirm(
+      count > 0
+        ? i18n.global.t('confirm-close.sidebar-ws-body', { count })
+        : i18n.global.t('confirm-close.sidebar-ws-body-empty', { name }),
+      {
+        title: i18n.global.t('confirm-close.sidebar-ws-title', { name }),
+        confirmText: i18n.global.t('confirm-close.sidebar-ws-confirm'),
+        cancelText: i18n.global.t('action.cancel'),
+        checkboxLabel: i18n.global.t('confirm-close.dont-show-again')
+      }
+    )
+    if (!ok) return
+    // Matching closeFocusedPane: only a confirmed close records the opt-out.
+    // Cancelling means "not this workspace", not "stop asking".
+    if (notifyRestore.dialogCheckbox.value) confirmBeforeCloseWorkspace.value = false
+  }
   // Closing the one on screen means landing somewhere first. Switching before
   // letting go — rather than after — is what puts the panes and the focus
   // somewhere valid: switchToWorkspace keeps the focused pane if it survives
@@ -14063,6 +14262,8 @@ interface WorkspaceGroupRow {
   isCurrent: boolean
   collapsed: boolean
   count: number
+  /** The ids `count` counted — what the sidebar rolls a status up from. */
+  paneIds: string[]
   lineage: PaneLineageRow[]
   groups: { id: string; name: string; rows: PaneLineageRow[] }[]
 }
@@ -15864,6 +16065,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :tab-request="settingsTabRequest"
       v-model:confirm-before-close="confirmBeforeClose"
       v-model:confirm-before-close-pane="confirmBeforeClosePane"
+      v-model:confirm-before-close-workspace="confirmBeforeCloseWorkspace"
       v-model:yolo-enabled="yoloEnabled"
       v-model:idle-reclaim-enabled="idleReclaimEnabled"
       v-model:idle-reclaim-minutes="idleReclaimMinutes"
@@ -15934,7 +16136,9 @@ function paneIsCommander(p: ActivePane): boolean {
       :fetch-history-log="fetchHistoryLog"
       :search-history-log-content="searchHistoryLogsContent"
       :preview-delete="previewHistoryDelete"
+      :refreshing="historyRefreshing"
       @close="showHistory = false"
+      @refresh="onRefreshHistory"
       @kill-all="onKillAll"
       @resume="onResumeHistoryAgent"
       @focus-pane="onFocusHistoryPane"
@@ -16463,10 +16667,7 @@ function paneIsCommander(p: ActivePane): boolean {
       <Transition name="ws-switch">
         <div v-if="switchingWorkspace" class="stage-switching" role="status" aria-live="polite">
           <div class="empty-card loading-card">
-            <div class="ws-switch-mark">
-              <img class="ws-switch-logo" :src="navideMark" alt="" />
-              <span class="ws-switch-orbit"></span>
-            </div>
+            <BrandLoader :size="72" />
             <h2>{{ $t('switchWorkspace.loading', { name: switchingWorkspaceName }) }}</h2>
           </div>
         </div>
@@ -18123,52 +18324,6 @@ function paneIsCommander(p: ActivePane): boolean {
    would just add delay to the thing that is already making them wait. */
 .ws-switch-leave-active { transition: opacity 160ms ease-out; }
 .ws-switch-leave-to { opacity: 0; }
-
-/* The cover borrows the boot screen's mark but deliberately not its motion.
-   Boot and shutdown breathe the logo in place — the app itself is starting or
-   stopping, so the mark is the thing that moves. A workspace switch is the
-   surroundings changing around an app that never stopped running, so the mark
-   holds its size and an arc travels around it instead. Same brand, different
-   sentence. */
-.ws-switch-mark {
-  position: relative;
-  width: 72px;
-  height: 72px;
-  margin: 0 auto;
-  display: grid;
-  place-items: center;
-}
-.ws-switch-logo {
-  width: 34px;
-  height: 34px;
-  display: block;
-  /* Opacity only, and shallower and quicker than boot's 2.6s breathe: the
-     scale is what makes that one read as breathing, so leaving it out is what
-     keeps these two apart at a glance. */
-  animation: ws-switch-glow 1.5s ease-in-out infinite;
-}
-.ws-switch-orbit {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 2px solid var(--accent-muted);
-  /* Two lit sides rather than one: the trailing quarter reads as a sweep round
-     the mark, where a single arc reads as the plain spinner it replaces. */
-  border-top-color: var(--accent-fg);
-  border-right-color: var(--accent-focus);
-  animation: ws-switch-orbit 1.1s linear infinite;
-}
-@keyframes ws-switch-orbit {
-  to { transform: rotate(360deg); }
-}
-@keyframes ws-switch-glow {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.62; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .ws-switch-logo { animation: none; }
-  .ws-switch-orbit { animation-duration: 2.4s; }
-}
 
 .spinner {
   width: 38px;

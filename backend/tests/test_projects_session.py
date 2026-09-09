@@ -352,8 +352,10 @@ def test_manual_pane_unspawn_clears_duplicates_sharing_session(
     store_with_stage: tuple[ProjectStore, str]
 ) -> None:
     # Two spawned records share one session (legacy duplicate accumulation —
-    # spawn now dedups by session, so seed the records directly): a single
-    # unspawn by session must clear BOTH so neither resurrects.
+    # spawn now dedups by session, so seed the records directly). Ghosts like
+    # these are only reachable once their pane_id has drifted, so an unspawn
+    # carrying an id no record holds falls back to the session and must clear
+    # BOTH so neither resurrects.
     store, ws = store_with_stage
     project = store.load_or_create(ws)
     project.panes.append(PaneRecord(pane_id="dup-a", origin="manual",
@@ -361,7 +363,7 @@ def test_manual_pane_unspawn_clears_duplicates_sharing_session(
     project.panes.append(PaneRecord(pane_id="dup-b", origin="manual",
                                     agent="claude", spawn_status="spawned", session_id="sess-d"))
     store.save(project)
-    store.record_manual_pane_unspawn(ws, pane_id="dup-b", session_id="sess-d")
+    store.record_manual_pane_unspawn(ws, pane_id="drifted-id", session_id="sess-d")
 
     manual = [p for p in store.peek(ws).panes if p.origin == "manual"]
     assert all(p.spawn_status == "removed" for p in manual)
@@ -402,6 +404,22 @@ def test_manual_pane_resume_of_live_session_keeps_both_records(
     manual = [p for p in store.peek(ws).panes if p.origin == "manual"]
     assert sorted(p.pane_id for p in manual) == ["pane-1", "pane-2"]
     assert all(p.spawn_status == "spawned" for p in manual)
+
+
+def test_manual_pane_unspawn_keeps_live_pane_sharing_session(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    # Closing one of two panes that deliberately share a session retires only
+    # the pane that was closed; the other is still live and must still restore.
+    store, ws = store_with_stage
+    store.record_manual_pane_spawn(ws, pane_id="pane-1", agent="claude", session_id="sess-l")
+    store.record_manual_pane_spawn(ws, pane_id="pane-2", agent="claude", session_id="sess-l")
+
+    _, removed = store.record_manual_pane_unspawn(ws, pane_id="pane-1", session_id="sess-l")
+
+    assert removed == ["pane-1"]
+    status = {p.pane_id: p.spawn_status for p in store.peek(ws).panes if p.origin == "manual"}
+    assert status == {"pane-1": "removed", "pane-2": "spawned"}
 
 
 def test_manual_pane_rebuild_sweeps_legacy_duplicates(

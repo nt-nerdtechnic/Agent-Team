@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from html import escape as html_escape
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -3438,7 +3439,20 @@ _UI_INVOKE_SLOW_TIMEOUT_S = 60.0
 #: close, getStatus and interrupt are cross-pane by design.
 _PANE_PRIVATE_UI_ACTIONS = frozenset({"ui.messaging.readIncoming", "ui.messaging.settleRead"})
 
-_UI_INVOKE_SLOW_ACTIONS = frozenset({"ui.pane.create"})
+# ui.pipeline.start spawns every slot of the run's first stage before it
+# answers, so it is at least as slow as a single pane create and usually
+# several times over. next / resume / restart all reach the same spawn loop
+# (App.vue: onPipelineNext and onPipelineResume both await activateStage,
+# onPipelineRestart kills the old panes and re-enters onPipelineStart), so a
+# SUCCESSFUL call would report itself as an unresponsive window on the normal
+# budget. ui.pipeline.reset and ui.pipeline.abort only tear down and stay out.
+_UI_INVOKE_SLOW_ACTIONS = frozenset({
+    "ui.pane.create",
+    "ui.pipeline.start",
+    "ui.pipeline.next",
+    "ui.pipeline.resume",
+    "ui.pipeline.restart",
+})
 _ui_invoke_pending: PendingRegistry[dict[str, Any]] = PendingRegistry()
 
 
@@ -4024,6 +4038,1783 @@ async def preview_show(
     if warning:
         result["warning"] = warning
     return result
+
+
+# ── Read-only inventory (usage / workspaces / pipelines / skills / log) ─────
+# Six Navide surfaces an agent could see nothing of: how much CLI quota is
+# left, which projects it may address by path, the pipeline templates and roles
+# a run is assembled from, where a run has got to, the shared skill library,
+# and the persisted message log. Every tool here only reads — nothing is
+# written, nothing is broadcast, and no window is asked for anything.
+
+#: Whole prompts are what an inventory must not hand back: a role's
+#: system_prompt and a slot's kickoff_body are each larger than the answer they
+#: would be attached to, and neither is needed to choose between pipelines.
+_PIPELINE_STAGE_FIELDS = (
+    "id",
+    "title",
+    "short_title",
+    "description",
+    "sentinel",
+    "allow_questions",
+)
+_PIPELINE_SLOT_FIELDS = ("agent_key", "role_key", "label", "is_commander")
+_ROLE_FIELDS = ("key", "label", "one_line", "is_default")
+
+#: Execution state of a project: the run, not the window it is drawn in.
+#: workspace_path is left out on purpose — the resolved one is reported instead.
+_PROJECT_FIELDS = (
+    "id",
+    "name",
+    "state",
+    "task_description",
+    "current_stage_index",
+    "total_stages",
+    "pipeline_id",
+    "run_count",
+    "log_file_name",
+    "updated_at",
+)
+_STAGE_RECORD_FIELDS = (
+    "stage_id",
+    "title",
+    "agent",
+    "role",
+    "pane_id",
+    "status",
+    "started_at",
+    "ended_at",
+)
+_PIPELINE_PANE_FIELDS = (
+    "pane_id",
+    "agent",
+    "role",
+    "stage_id",
+    "stage_index",
+    "slot_label",
+    "spawn_status",
+    "kickoff_status",
+)
+
+#: A skill's `body` is the instructions themselves — the one field a listing
+#: must leave behind. `fields` is the parsed frontmatter it was read from.
+_SKILL_FIELDS = (
+    "name",
+    "description",
+    "enabled",
+    "targets",
+    "managed",
+    "valid",
+    "native_conflict",
+)
+_NATIVE_SKILL_FIELDS = (
+    "name",
+    "description",
+    "source",
+    "owner_agent",
+    "real_path",
+    "valid",
+)
+
+#: How many of the caller's own messages one read may return.
+_MESSAGE_LOG_MAX_LIMIT = 200
+#: Rows read before the privacy filter runs. The log is one flat tail of
+#: everybody's messages, so reaching `limit` of the caller's own means
+#: over-reading; this is the store's own retention cap, so the over-read can
+#: never grow into a full-table scan.
+_MESSAGE_LOG_SCAN_ROWS = 500
+
+
+def _pick(source: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    """The named keys of ``source``; a key that is not there is left out."""
+    return {key: source[key] for key in fields if key in source}
+
+
+@server.tool()
+async def cli_usage(ctx: Context, agent: str = "") -> dict[str, Any]:
+    """Read how much CLI quota each vendor has left, as Navide tracks it.
+
+    Check it before handing work to another pane: cli_send queues a task for a
+    CLI whose plan is exhausted just as happily as for one that can run it, and
+    the message lands only for the other agent to fail on it. The same is worth
+    doing before cli_open_agent picks which vendor to open. Read-only.
+
+    The numbers are the vendors' own, reported unchanged — Navide neither
+    recomputes them nor annotates them, so read the fields a vendor gives you
+    rather than expecting one shape for all of them.
+
+    agent narrows the answer to one vendor key ("claude", "codex", ...) — the
+    same key cli_whoami reports as agent_key. Left empty, every tracked vendor
+    comes back.
+
+    Returns {ok, providers, accounts, enabled, intervalSec}, plus `agent` when
+    a filter was applied. `providers` maps a vendor key to its current
+    snapshot; `accounts` maps a vendor key to that vendor's per-account
+    snapshots, keyed by account slot, for the vendors where Navide tracks more
+    than one login. `enabled` false means quota polling is switched off, so
+    whatever is here is only what was read last. A vendor with no entry at all
+    is one Navide cannot read a quota for — which is not the same claim as a
+    vendor with quota left.
+    """
+    try:
+        _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    from agent_team_backend.usage_service import service
+
+    # The same call that serves the UI's usage badges, off the loop: it walks
+    # every stale snapshot to re-check whether its reset window has passed.
+    payload = await asyncio.to_thread(service.payload)
+    providers = dict(payload.get("providers") or {})
+    accounts = dict(payload.get("accounts") or {})
+    agent = str(agent or "").strip().lower()
+    result: dict[str, Any] = {"ok": True}
+    if agent:
+        result["agent"] = agent
+        providers = {key: snap for key, snap in providers.items() if key == agent}
+        accounts = {key: snap for key, snap in accounts.items() if key == agent}
+    result["providers"] = providers
+    result["accounts"] = accounts
+    result["enabled"] = payload.get("enabled")
+    result["intervalSec"] = payload.get("intervalSec")
+    return result
+
+
+def _recent_workspace_rows() -> dict[str, Any]:
+    """Recent workspaces, each marked with whether a live pane sits in it.
+
+    One thread's worth of work because both halves touch the disk: the store
+    stats every recent path, and _norm_workspace resolves symlinks.
+    """
+    from agent_team_backend import app as _app
+
+    live = {_norm_workspace(path) for path in _live_pane_workspaces()}
+    workspaces = [
+        {
+            **entry,
+            "has_live_panes": _norm_workspace(str(entry.get("path") or "")) in live,
+        }
+        for entry in _app.recent_workspaces_store.list()
+    ]
+    return {"workspaces": workspaces, "live_pane_workspaces": sorted(live)}
+
+
+@server.tool()
+async def workspace_list(ctx: Context) -> dict[str, Any]:
+    """List the projects Navide knows about, so you can name one by path.
+
+    Every tool that takes a workspace_path — plan_create, preview_record,
+    cli_open_agent — wants the absolute path of a project root, and nothing
+    told you which paths those are. This is that list: the workspaces the user
+    has opened, most recently opened first. Read-only.
+
+    Returns {workspaces, live_pane_workspaces}. Each workspace carries the
+    store's own record (path, name, last_opened_at, pinned, exists) plus
+    has_live_panes: true when a CLI pane is running in it right now. Prefer one
+    of those — a workspace with has_live_panes false has no Navide window
+    watching it, so a plan or a preview written there is not shown to the user
+    at all. `exists` false is the harder failure: the folder is gone from disk.
+
+    `live_pane_workspaces` is that live set on its own, resolved. A pane can be
+    running in a project the user never opened from the welcome screen, which
+    is a perfectly legal workspace_path that the recent list does not mention.
+    """
+    _resolve_caller(ctx)
+    return await asyncio.to_thread(_recent_workspace_rows)
+
+
+def _pipeline_inventory() -> dict[str, Any]:
+    """Pipelines with their stages, the active pipeline id, and the roles.
+
+    All four reads in a single thread: they are four reads of the same stored
+    document, and handing each one to the pool separately buys nothing.
+    """
+    from agent_team_backend import app as _app
+
+    pipelines: list[dict[str, Any]] = []
+    for pipeline in _app.stages_store.list_pipelines():
+        stages: list[dict[str, Any]] = []
+        for stage in _app.stages_store.list(pipeline["id"]):
+            view = _pick(stage, _PIPELINE_STAGE_FIELDS)
+            view["recommended_roles"] = list(stage.get("recommended_roles") or [])
+            view["slots"] = [
+                _pick(slot, _PIPELINE_SLOT_FIELDS) for slot in stage.get("slots") or []
+            ]
+            stages.append(view)
+        pipelines.append({**pipeline, "stages": stages})
+    return {
+        "pipelines": pipelines,
+        "active_pipeline_id": _app.stages_store.get_active_pipeline_id(),
+        "roles": [_pick(role, _ROLE_FIELDS) for role in _app.roles_store.list()],
+    }
+
+
+@server.tool()
+async def pipeline_list(ctx: Context) -> dict[str, Any]:
+    """List Navide's pipeline templates and the roles their stages are cast from.
+
+    A pipeline is a saved multi-stage run: an ordered set of stages, each with
+    slots naming which CLI plays which role. The user starts one from the
+    Pipelines window, and it is the shape a whole team of panes is built in —
+    none of which was visible from here. Read it to describe what the user's
+    Navide can run, or to see which stage a task belongs to before opening a
+    pane for it yourself. Read-only: nothing here starts a run.
+
+    Returns {pipelines, active_pipeline_id, roles}. Each pipeline is {id, name,
+    builtin, stage_count, stages}; each stage is {id, title, short_title,
+    description, sentinel, allow_questions, recommended_roles, slots}, and each
+    slot {agent_key, role_key, label, is_commander}. `active_pipeline_id` is
+    the template the Pipelines window currently has selected.
+
+    Two things are deliberately not here, because both are whole prompts: a
+    slot's kickoff body, and a role's system prompt. `roles` gives each role's
+    {key, label, one_line, is_default} — enough to know what a role_key means.
+
+    Templates only. Where a run has actually got to is pipeline_status.
+    """
+    _resolve_caller(ctx)
+    return await asyncio.to_thread(_pipeline_inventory)
+
+
+def _pipeline_status_of(workspace_path: str) -> dict[str, Any]:
+    """Execution state of the project stored for ``workspace_path``.
+
+    peek() never creates a project, so a workspace that has never run a
+    pipeline answers with the empty state rather than an error — and rather
+    than a file this call wrote on its way past.
+    """
+    from agent_team_backend import app as _app
+
+    project = _app.project_store.peek(workspace_path)
+    if project is None:
+        return {"workspace_path": workspace_path, "active": False}
+    # Through _project_payload, the same serialisation project.get serves the
+    # renderer from, and then narrowed: the full payload is mostly persisted UI
+    # state (themes, tab order, spawn history) that would bury the answer.
+    stored = _app._project_payload(project)["project"]
+    status: dict[str, Any] = {"workspace_path": workspace_path}
+    status["active"] = stored.get("state") == "running"
+    status.update(_pick(stored, _PROJECT_FIELDS))
+    status["stages"] = [
+        _pick(stage, _STAGE_RECORD_FIELDS) for stage in stored.get("stages") or []
+    ]
+    status["panes"] = [
+        _pick(pane, _PIPELINE_PANE_FIELDS)
+        for pane in stored.get("panes") or []
+        if pane.get("origin") == "pipeline"
+    ]
+    return status
+
+
+@server.tool()
+async def pipeline_status(ctx: Context, workspace_path: str = "") -> dict[str, Any]:
+    """Report where a workspace's pipeline run has got to, if it has one.
+
+    Use it to find out whether you are part of something larger: a pane opened
+    as a pipeline slot is told its task, not that it is stage three of five,
+    and the stage after yours does not start until yours is recorded finished.
+    Read it before deciding how much of a job is yours. Read-only.
+
+    Returns {workspace_path, active, ...}. `active` is true only while a run is
+    in progress. A workspace that has never run a pipeline answers with
+    {workspace_path, active: false} and nothing else — that is the empty state,
+    not an error.
+
+    When a project exists it also carries: state (idle / running / completed /
+    aborted), task_description (what the run was started for), pipeline_id
+    (which template from pipeline_list), current_stage_index and total_stages,
+    run_count, log_file_name, updated_at, plus `stages` — {stage_id, title,
+    agent, role, pane_id, status, started_at, ended_at} each — and `panes`,
+    the pipeline slots as {pane_id, agent, role, stage_id, stage_index,
+    slot_label, spawn_status, kickoff_status}. Panes the user or an agent
+    opened by hand are not pipeline slots and are left out; cli_list_targets is
+    where every pane is listed.
+
+    workspace_path defaults to your own pane's workspace; pass it only to ask
+    about another project.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    return await asyncio.to_thread(_pipeline_status_of, workspace_path)
+
+
+def _skills_inventory(agent_key: str) -> dict[str, Any]:
+    """The skill library, narrowed to a summary, plus what ``agent_key`` gets.
+
+    ``agent_key`` empty is a caller with no pane identity: it is nobody's
+    delivery target, so the "mine" half is omitted rather than guessed at.
+    """
+    from agent_team_backend import app as _app
+
+    listing = _app.skills_store.list_skills()
+    result: dict[str, Any] = {
+        "skills": [_pick(skill, _SKILL_FIELDS) for skill in listing.get("skills") or []],
+        "native": [
+            _pick(skill, _NATIVE_SKILL_FIELDS) for skill in listing.get("native") or []
+        ],
+        "root": listing.get("root", ""),
+        "agents": listing.get("agents") or [],
+    }
+    if agent_key:
+        result["delivered_to_me"] = {
+            "agent_key": agent_key,
+            "skills": _app.skills_store.targets_for(agent_key),
+            "native_paths": _app.skills_store.native_targets_for(agent_key),
+        }
+    return result
+
+
+@server.tool()
+async def skills_list(ctx: Context) -> dict[str, Any]:
+    """List the skills Navide manages, and which of them reach you.
+
+    A skill is a folder of instructions a CLI loads on demand. Navide keeps a
+    shared library the user can deliver to any vendor, and also reflects the
+    ones each CLI keeps in its own directory. Read this to find out what is
+    available before writing an instruction yourself, or to tell the user which
+    skill would cover what they are asking for. Read-only — delivering a skill
+    is the user's decision, made in Settings.
+
+    Returns {skills, native, root, agents}. Each shared skill is {name,
+    description, enabled, targets, managed, valid, native_conflict}: `targets`
+    null means every vendor receives it, a list means only those vendors, and
+    `enabled` false means nobody does. Each native entry is {name, description,
+    source, owner_agent, real_path, valid} — a skill some CLI already owns.
+    `agents` is every vendor with its delivery support (wired / planned /
+    unsupported), so "not delivered" and "cannot be delivered" stay apart.
+
+    `delivered_to_me` is the half about you: {agent_key, skills, native_paths},
+    the names your own CLI is actually given. It is absent for a caller with no
+    pane identity, which is nobody's delivery target.
+
+    Names and descriptions only. A skill's instructions are read from its own
+    folder when you use it, not from here.
+    """
+    caller = _resolve_caller(ctx)
+    agent_key = ""
+    if caller.kind == "pane":
+        from agent_team_backend import agent_messaging
+
+        me = agent_messaging.get(caller.pane_id)
+        agent_key = me.agent_key if me else ""
+    return await asyncio.to_thread(_skills_inventory, agent_key)
+
+
+@server.tool()
+async def cli_message_log(ctx: Context, limit: int = 50) -> dict[str, Any]:
+    """Read your own message history — what you sent and what reached you.
+
+    cli_inbox_summary reports only your sends that are stuck, and
+    cli_pending_incoming only what has not been delivered yet. Neither answers
+    "what did we already say to each other": once a message lands it leaves
+    both of those, and after a compaction it is gone from your context too.
+    This is the persisted log, so it survives a backend restart. Read-only —
+    reading here never takes a message off anyone's queue.
+
+    limit is how many of your own messages come back (1..200, newest last).
+
+    Only your own messages are returned: a row is yours when you are its sender
+    or its recipient, matched on your current messaging name. Everybody else's
+    traffic is not readable from here, and a message queued for a name you have
+    since been renamed away from stops matching as yours.
+
+    Returns {ok, count, messages, scanned, truncated}. Each message is {uid,
+    created_at (epoch milliseconds), status, sender, recipient, direction,
+    excerpt} plus, when set, kind / reason / delivered_at / correlation_id /
+    reply_to / remote / remote_workspace. `direction` is "sent" when you were
+    the sender, "received" otherwise. `excerpt` is 200 characters with the
+    whitespace flattened; cli_read_incoming is what returns a message in full.
+
+    `truncated` true means older messages of yours were cut off — either by
+    `limit`, or by the window of recent rows this scans. `scanned` is how many
+    rows that window held.
+    """
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    if caller.kind != "pane":
+        return {
+            "ok": False,
+            "error": (
+                "only a Navide CLI pane has a message history — a host or "
+                "external caller has no messaging name to have sent or "
+                "received anything under."
+            ),
+        }
+    from agent_team_backend import agent_messaging, app
+
+    # _resolve_caller has just rejected a stale pane id, so this is set; the
+    # guard is here for the type, not for a reachable state.
+    me = agent_messaging.get(caller.pane_id)
+    if me is None:
+        return {"ok": False, "error": "this pane is no longer registered for messaging"}
+    limit = max(1, min(int(limit), _MESSAGE_LOG_MAX_LIMIT))
+    # Both forms: a message from another workspace was addressed to the
+    # qualified name, one from this window to the bare one.
+    mine = {me.name, me.qualified_name}
+    rows = await asyncio.to_thread(app.agent_message_log.tail, _MESSAGE_LOG_SCAN_ROWS)
+    messages: list[dict[str, Any]] = []
+    for row in rows:
+        sender = str(row.get("sender") or "")
+        recipient = str(row.get("recipient") or "")
+        if sender not in mine and recipient not in mine:
+            continue
+        excerpt = "".join(
+            list(" ".join(str(row.get("content") or "").split()))[
+                :_INCOMING_EXCERPT_CHARS
+            ]
+        )
+        message: dict[str, Any] = {
+            "uid": row.get("uid", ""),
+            "created_at": row.get("created_at", 0),
+            "status": row.get("status", ""),
+            "sender": sender,
+            "recipient": recipient,
+            "direction": "sent" if sender in mine else "received",
+            "excerpt": excerpt,
+        }
+        for key in (
+            "kind",
+            "reason",
+            "delivered_at",
+            "correlation_id",
+            "reply_to",
+            "remote",
+            "remote_workspace",
+        ):
+            if row.get(key):
+                message[key] = row[key]
+        messages.append(message)
+    truncated = len(messages) > limit or len(rows) >= _MESSAGE_LOG_SCAN_ROWS
+    messages = messages[-limit:]
+    return {
+        "ok": True,
+        "count": len(messages),
+        "messages": messages,
+        "scanned": len(rows),
+        "truncated": truncated,
+    }
+
+
+# ── Second round: clearing the feed / tokens / instruction files / closing ──
+# Four gaps the first round left. preview_record, preview_list and preview_show
+# gave the record feed three verbs and no way to empty it; the token panel's
+# numbers were readable only by the user looking at the panel; the instruction
+# files every CLI loads were invisible to the agents loading them; and closing a
+# pane was reachable only through ui_invoke, one rung past cli_interrupt with no
+# tool of its own. Only preview_clear writes anything.
+
+#: Archived runs a token snapshot hands back, newest last. The store already
+#: caps its own list at 20; this trims further because each run carries three
+#: breakdown maps and none of them answer "how much has this project spent".
+_TOKEN_RUNS_LIMIT = 5
+#: Per-run fields kept: the run's own aggregate, never the by_vendor /
+#: by_stage / by_pane maps hanging off it.
+_TOKEN_RUN_FIELDS = ("run_id", "task", "started_at", "ended_at", "totals")
+#: Live per-session tallies returned, busiest first.
+_TOKEN_SESSIONS_LIMIT = 10
+#: Days of the global by_day history returned, oldest first. The map grows by
+#: one key a day forever, so it is the one part of a snapshot with no bound.
+_TOKEN_DAYS_LIMIT = 7
+
+
+@server.tool()
+async def preview_clear(
+    ctx: Context, workspace_path: str = "", before: int = 0
+) -> dict[str, Any]:
+    """Empty this workspace's Preview record feed.
+
+    The fourth verb: preview_record adds to the feed, preview_list reads it,
+    preview_show pushes to it, and until now nothing could take anything off
+    it. Use it when the feed is stale enough to mislead — a finished task's
+    churn sitting above what the user is about to review.
+
+    This deletes rows the user can see in the Preview panel and cannot be
+    undone. Everything on the feed goes, not only your own records: the file
+    watcher's and the user's are on it too, so prefer `before` over a full
+    clear whenever the point is "drop what is already dealt with".
+
+    before is a created_at timestamp from preview_list (epoch milliseconds):
+    rows stamped BEFORE it go and everything at or after it stays, which is
+    what makes clearing safe while other sessions are still recording. Left at
+    0 the whole feed is cleared.
+
+    Returns {workspace_path, removed, before}; `removed` is how many rows went,
+    0 when the feed was already empty. A "warning" field means no live Navide
+    pane uses workspace_path, so this cleared a feed the user is not watching.
+
+    workspace_path defaults to your own pane's workspace; pass it only to clear
+    another project's feed.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    cutoff = int(before) or None
+    if cutoff is not None and cutoff < 0:
+        raise FsError(
+            f"before must be a created_at timestamp from preview_list, not {before!r}"
+        )
+    removed = await asyncio.to_thread(
+        _preview_log().clear, workspace_path, before=cutoff
+    )
+    if removed:
+        # Same event the preview.log_clear handler emits, for the same reason:
+        # every window showing this workspace is drawing the rows that just
+        # went, and nothing else tells it they are gone.
+        from agent_team_backend import app as _app
+        from agent_team_backend.ipc import make_event
+
+        await _app.broadcast(
+            make_event(
+                "preview.log_cleared",
+                {
+                    "workspace_path": workspace_path,
+                    "before": cutoff,
+                    "removed": removed,
+                },
+            )
+        )
+    result: dict[str, Any] = {
+        "workspace_path": workspace_path,
+        "removed": removed,
+        "before": cutoff or 0,
+    }
+    warning = await asyncio.to_thread(_workspace_mismatch_warning, workspace_path)
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+def _token_stats_of(workspace_path: str) -> dict[str, Any]:
+    """A token snapshot narrowed to what fits in an answer.
+
+    The store's own snapshot carries twenty archived runs with three breakdown
+    maps each, every live session, and one entry per day since the store was
+    created. Handed back whole it would be larger than whatever question it was
+    asked in aid of, so the aggregates come through intact and the lists are
+    cut to their most recent or busiest few.
+    """
+    from agent_team_backend import app as _app
+
+    snapshot = _app.tokens_store.snapshot(workspace_path)
+    workspace = dict(snapshot.get("workspace") or {})
+    runs = list(workspace.get("runs") or [])
+    sessions = dict(workspace.get("live_by_session") or {})
+    busiest = sorted(
+        sessions.items(),
+        key=lambda item: int(item[1].get("input", 0)) + int(item[1].get("output", 0)),
+        reverse=True,
+    )
+    global_doc = dict(snapshot.get("global") or {})
+    by_day = dict(global_doc.get("by_day") or {})
+    recent_days = sorted(by_day)[-_TOKEN_DAYS_LIMIT:]
+    return {
+        "workspace_path": snapshot.get("workspace_path", ""),
+        "current_run": workspace.get("current_run"),
+        "cumulative": workspace.get("cumulative"),
+        "runs": [_pick(run, _TOKEN_RUN_FIELDS) for run in runs[-_TOKEN_RUNS_LIMIT:]],
+        "runs_truncated": len(runs) > _TOKEN_RUNS_LIMIT,
+        "live_sessions": dict(busiest[:_TOKEN_SESSIONS_LIMIT]),
+        "live_session_count": len(sessions),
+        "all_time": global_doc.get("all_time"),
+        "by_vendor": global_doc.get("by_vendor"),
+        "by_day": {day: by_day[day] for day in recent_days},
+    }
+
+
+@server.tool()
+async def cli_token_stats(ctx: Context, workspace_path: str = "") -> dict[str, Any]:
+    """Read how many tokens this workspace has spent, as Navide counts them.
+
+    The numbers behind the Token panel: what the current run has used, what the
+    project has used across every run, and what every vendor has used all time.
+    Read it when the user asks what a job has cost, or before starting
+    something long enough that the answer matters. cli_usage is the other half
+    — that is quota left with the vendor, this is spend recorded here.
+    Read-only.
+
+    Returns {workspace_path, current_run, cumulative, runs, runs_truncated,
+    live_sessions, live_session_count, all_time, by_vendor, by_day}. The three
+    aggregates come through whole: `cumulative` is this project's totals with
+    by_vendor and by_stage breakdowns, `all_time` and `by_vendor` are every
+    project's. `current_run` is null when no pipeline run is open. `runs` is the
+    last few archived runs, aggregate only, with runs_truncated true when older
+    ones were cut. `live_sessions` is the busiest CLI sessions running now
+    ({input, output, calls} each, keyed by session), `live_session_count` how
+    many there are in total, and `by_day` the last week of global usage.
+
+    A count is what a vendor's own session log holds, so a vendor whose log
+    Navide cannot read contributes nothing rather than a zero.
+
+    workspace_path defaults to your own pane's workspace; pass it only to ask
+    about another project.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    return await asyncio.to_thread(_token_stats_of, workspace_path)
+
+
+def _memory_workspace_root(workspace_path: str) -> Path | None:
+    """The workspace an instruction-file request is scoped to, or None.
+
+    Deliberately NOT resolve_plan_root: the Memory settings page scopes its
+    listing to the window's workspace verbatim, and a tool that walked up to
+    the git root instead would report a different set of project-scoped files
+    than the page the user checks it against. A path that is not a directory
+    yields None, which limits the answer to user scope rather than failing it.
+    """
+    if not workspace_path:
+        return None
+    path = Path(workspace_path).expanduser()
+    return path if path.is_dir() else None
+
+
+def _memory_inventory(workspace_path: str, path: str) -> dict[str, Any]:
+    """The instruction-file listing, or the text of one file from it."""
+    from agent_team_backend import native_memory
+
+    workspace = _memory_workspace_root(workspace_path)
+    listing = [entry.as_dict() for entry in native_memory.scan(None, workspace)]
+    if not path:
+        return {
+            "workspace_path": str(workspace) if workspace else "",
+            "files": listing,
+            "agents": native_memory.agent_targets(),
+        }
+    wanted = str(Path(path).expanduser())
+    entry = next((row for row in listing if row.get("path") == wanted), None)
+    if entry is None:
+        # The security boundary, not a convenience check: without it any
+        # absolute path would be readable through a tool whose whole promise is
+        # "the instruction files". native_memory.read enforces the same list
+        # again from its own table; both stay, because the two lists agreeing
+        # is what this asserts rather than assumes.
+        raise FsError(
+            f"not a known instruction file: {path!r} — pass one of the paths "
+            "memory_list returns when called with no path"
+        )
+    try:
+        content = native_memory.read(wanted, None, workspace)
+    except ValueError as err:
+        raise FsError(str(err)) from err
+    return {
+        "workspace_path": str(workspace) if workspace else "",
+        "file": entry,
+        **content,
+    }
+
+
+@server.tool()
+async def memory_list(
+    ctx: Context, workspace_path: str = "", path: str = ""
+) -> dict[str, Any]:
+    """List the instruction files the CLIs here load, or read one of them.
+
+    CLAUDE.md, AGENTS.md, GEMINI.md and the rest: the standing instructions a
+    vendor reads at startup, in this project and in the user's home. Read them
+    before writing something that has to live alongside them — a convention the
+    project already states, or the reason another vendor behaves differently
+    from you. Read-only: editing an instruction file is the user's decision,
+    made in Settings, and there is no tool here for it.
+
+    Called with no path this lists metadata only — {workspace_path, files,
+    agents}. Each file is {scope (user / project), path, relative, readers (the
+    vendor keys that load it), canonical, exists, size, modified, error}; a
+    file that does not exist yet is still listed, because it names where a
+    convention would go. `agents` is every vendor with how Navide finds its
+    files (mapped / configured).
+
+    Called with a path it returns that one file: {workspace_path, file, path,
+    text, exists, modified}. The path must be one this listing reported —
+    anything else is refused, so this is not a way to read arbitrary files.
+
+    workspace_path defaults to your own pane's workspace; pass it only to ask
+    about another project. Without one, only user-scope files are listed.
+    """
+    caller = _resolve_caller(ctx)
+    chosen = workspace_path or _caller_workspace(caller)
+    # One thread for the whole inventory: scan() stats every candidate in the
+    # home and the workspace, and read() opens a file.
+    return await asyncio.to_thread(_memory_inventory, chosen, str(path or "").strip())
+
+
+# ── Closing another pane ─────────────────────────────────────────────────────
+@server.tool()
+async def cli_close_agent(target: str, ctx: Context, pane_id: str = "") -> dict[str, Any]:
+    """Close a CLI pane: the other half of cli_open_agent.
+
+    THIS ENDS THE OTHER AGENT'S WORK. The pane and its PTY go away, whatever
+    turn was running dies with them, and anything queued for that pane is never
+    delivered. It cannot be undone — a closed pane's session is gone, not
+    parked. Check cli_get_status first and do not close a pane that is working;
+    cli_interrupt is the softer rung (it presses the interrupt key and leaves
+    the pane open), and cli_send is softer still (it waits for the turn to
+    finish).
+
+    Use it to clean up a pane you opened with cli_open_agent and no longer
+    need. Panes the user opened are the user's; closing one takes their work
+    away with no warning they will see first.
+
+    `target` uses the same addressing as cli_send and `pane_id` names one exact
+    pane instead. Panes on this machine only: closing one is an action taken by
+    the window that owns it and there is no relay for it, so a
+    `<device>/<workspace>/<pane>` address fails with "close-local-only" — that
+    is a limit of this tool, not a wrong address.
+
+    Returns {ok, target, name, closed, advisories?}. `advisories` is what
+    closing cost that nobody else would have reported: the pane was mid-turn,
+    messages were queued for it, it had children that are now orphaned. They
+    are gathered before the kill because none of it is knowable afterwards.
+    `ok` false means nothing was closed — an unknown target, or the owning
+    window did not answer.
+    """
+    from agent_team_backend import message_routing
+
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    me = caller.pane_id if caller.kind == "pane" else ""
+    result, failure = _resolve_pane_target(caller, me, target, pane_id)
+    if failure is not None:
+        # Same reason cli_interrupt re-reads the address here: the local errors
+        # would send the caller back to fix an address that is not the problem.
+        if not (pane_id or "").strip():
+            routed = message_routing.route(me, target)
+            if routed.remote is not None:
+                return {
+                    "ok": False,
+                    "error": (
+                        f'cannot close "{target}": it names a pane on another '
+                        f"device, and closing one is an action taken by the window "
+                        f"that owns it — there is no relay for that at any link "
+                        f"state. The address may be perfectly good; only panes on "
+                        f"this machine can be closed from here. To end a remote "
+                        f"pane's work, cli_send it a message asking it to stop."
+                    ),
+                    "error_code": "close-local-only",
+                }
+        return failure
+    pane = result.pane
+    if caller.kind == "pane" and pane.pane_id == caller.pane_id:
+        # Closing yourself takes the PTY the answer would come back through, so
+        # the caller could never read the result of its own call.
+        return {
+            "ok": False,
+            "target": pane.qualified_name,
+            "error": (
+                "that is your own pane — closing it would take away the turn "
+                "making this call, so you would never see the answer. Ask the "
+                "user to close it instead."
+            ),
+            "error_code": "self-close",
+        }
+
+    reply = await _ui_request(
+        pane.workspace_path,
+        "invoke",
+        caller=_pane_caller(pane.pane_id),
+        action="ui.pane.close",
+        args={"paneId": pane.pane_id},
+    )
+    if not reply.get("ok"):
+        # The window is the only thing that can close a pane, so a window that
+        # did not answer means nothing was closed.
+        return {
+            "ok": False,
+            "target": pane.qualified_name,
+            "error": str(reply.get("error") or "the window owning this pane did not answer"),
+            "error_code": str(reply.get("error_code") or "ui_action_failed"),
+        }
+    payload = reply.get("result") or {}
+    answer: dict[str, Any] = {
+        "ok": True,
+        "target": pane.qualified_name,
+        "name": pane.name,
+        "closed": True,
+    }
+    advisories = [str(a) for a in (payload.get("advisories") or [])]
+    if advisories:
+        answer["advisories"] = advisories
+    return answer
+
+
+# ── Pipelines: starting and aborting a run ──────────────────────────────────
+# pipeline_list and pipeline_status only read. These two act, and both go
+# through the window rather than the backend's own project_store: the
+# `pipeline.start` handler writes the run record, while the panes for each
+# stage are spawned by the renderer (onPipelineStart → preSpawnStage →
+# activateStage). Writing the record from here would leave a run that reads as
+# started and did nothing at all.
+
+
+@server.tool()
+async def pipeline_start(
+    ctx: Context,
+    task: str = "",
+    pipeline_id: str = "",
+    workspace_path: str = "",
+) -> dict[str, Any]:
+    """Start a pipeline run: open the first stage's panes and hand them the task.
+
+    THIS OPENS CLI PANES AND SPENDS THEIR QUOTA. A pipeline is a template of
+    stages, and every slot of a stage is a fresh CLI process with its own
+    context and its own bill; later stages open as the run advances. Read
+    pipeline_list first for the templates this machine has and what each one is
+    made of, and pipeline_status for whether a run is already in progress —
+    starting one is not a step to take on a guess.
+
+    `pipeline_id` is the template to run, as pipeline_list reports its id. Left
+    empty, the workspace's currently selected pipeline runs; a workspace with
+    none selected refuses rather than picking one for you. `task` is what the
+    run is for — the text each stage's kickoff message is built from.
+
+    Returns the window's own reply — {ok, result, error}. `result` carries
+    {pipelineId, stages, workspacePath, state} for a run that actually started.
+    ok false means nothing started: a run already going (abort it first), no
+    pipeline to run, or a first stage whose panes all failed to spawn. The
+    window reports the run's own state rather than the fact that the call
+    returned, so "ok" here is not the "started but nothing happened" answer.
+
+    workspace_path defaults to your own pane's workspace; pass it only to start
+    a run in another project's window.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    args: dict[str, Any] = {"task": str(task or "")}
+    pipeline_id = str(pipeline_id or "").strip()
+    if pipeline_id:
+        args["pipelineId"] = pipeline_id
+    return await _ui_request(
+        workspace_path, "invoke", caller=caller, action="ui.pipeline.start", args=args
+    )
+
+
+@server.tool()
+async def pipeline_abort(ctx: Context, workspace_path: str = "") -> dict[str, Any]:
+    """Stop the pipeline run in progress in a workspace.
+
+    Abort is a pause, not a kill: the orchestration stops (no further stage is
+    activated, no more routing between the panes), and the panes already open
+    stay open with their work intact, so the user can resume the run from the
+    banner the window then shows. Nothing is deleted.
+
+    Returns the window's own reply — {ok, result, error}, `result` carrying
+    {workspacePath, state}. ok false means nothing was aborted, the usual
+    reason being that no run was in progress; pipeline_status says whether one
+    is.
+
+    workspace_path defaults to your own pane's workspace; pass it only to stop
+    a run in another project's window.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    return await _ui_request(
+        workspace_path, "invoke", caller=caller, action="ui.pipeline.abort", args={}
+    )
+# ── Pipelines: editing the definitions themselves ───────────────────────────
+# pipeline_start / pipeline_abort go through the window, because the renderer
+# owns a *run*. These three do not: pipelines, stages and roles are backend
+# state (stages_store / roles_store), and the ws handlers that maintain them
+# write the store and then broadcast so every open window redraws itself.
+#
+# So each op below emits exactly the events its ws.* twin emits. A tool that
+# wrote the store and stayed quiet would leave the Pipelines window showing the
+# definition it loaded at open time — the change is on disk, the screen never
+# moves, and the user reports it as "it did nothing".
+
+_PIPELINE_DEFINE_OPS = ("create", "rename", "delete", "set_active", "reset_builtin")
+_STAGE_DEFINE_OPS = ("upsert", "delete", "reorder", "reset")
+_ROLE_DEFINE_OPS = ("upsert", "rename", "delete", "reset")
+
+
+def _bad_op(op: str, allowed: tuple[str, ...]) -> dict[str, Any]:
+    """Refuse an op we do not know rather than falling through to a default.
+
+    An op-dispatched tool that treats anything unrecognised as its most common
+    op turns a typo into a silent write of the wrong kind, so the whole set is
+    named back to the caller instead.
+    """
+    return {
+        "ok": False,
+        "error": f"unknown op {op!r}; expected one of: {', '.join(allowed)}",
+        "error_code": "bad_op",
+    }
+
+
+def _missing_arg(op: str, names: str) -> dict[str, Any]:
+    """Refuse before the store is touched, so a half-given op writes nothing."""
+    return {
+        "ok": False,
+        "error": f"op {op!r} requires {names}",
+        "error_code": "missing_argument",
+    }
+
+
+def _run_in_progress(what: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": (
+            f"cannot {what} while a pipeline run is in progress in this "
+            "workspace — pipeline_status shows the run, pipeline_abort stops it"
+        ),
+        "error_code": "pipeline_running",
+    }
+
+
+def _store_refused(exc: Exception) -> dict[str, Any]:
+    """A store-level rejection (bad id, last-of-its-kind, no seed data)."""
+    code = "not_found" if isinstance(exc, KeyError) else "invalid"
+    message = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
+    return {"ok": False, "error": str(message), "error_code": code}
+
+
+async def _definition_workspace(caller: _Caller, workspace_path: str) -> str:
+    """The workspace whose run guards a definition edit, or "" for none.
+
+    Unlike :func:`_plan_workspace` this never raises: the ws handlers treat a
+    blank workspace_path as "no run to check", and a host or external caller
+    with no pane of its own has exactly that. Passing one turns the guards on.
+    """
+    chosen = workspace_path or _caller_workspace(caller)
+    if not chosen:
+        return ""
+    return await asyncio.to_thread(resolve_plan_root, chosen)
+
+
+def _run_is_active(workspace_path: str) -> bool:
+    """True while `workspace_path` has a pipeline run in the running state."""
+    from agent_team_backend import app as _app
+
+    if not workspace_path:
+        return False
+    project = _app.project_store.peek(workspace_path)
+    return bool(project is not None and project.state == "running")
+
+
+def _stage_edit_blocked(workspace_path: str, pipeline_id: str) -> bool:
+    """The ws handlers' own guard, imported rather than restated.
+
+    ws_handlers._stage_edit_hits_running_pipeline compares against the pipeline
+    the run recorded, not against whichever one the request named — a
+    distinction that was a bug fix, and one a second copy here would drift
+    away from at the first change.
+    """
+    from agent_team_backend.ws_handlers import _stage_edit_hits_running_pipeline
+
+    return _stage_edit_hits_running_pipeline(workspace_path, pipeline_id or None)
+
+
+async def _publish_pipelines(reason: str) -> dict[str, Any]:
+    """Broadcast pipelines.changed and hand the same snapshot to the caller.
+
+    The pipeline summaries carry stage_count, which is why every stage edit
+    republishes them too (ws_handlers._broadcast_pipeline_summaries): a stage
+    edit that only says stages.changed leaves a stale "N stages" on screen.
+    """
+    from agent_team_backend import app as _app
+    from agent_team_backend.ipc import make_event
+
+    def _snapshot() -> dict[str, Any]:
+        return {
+            "pipelines": _app.stages_store.list_pipelines(),
+            "active_pipeline_id": _app.stages_store.get_active_pipeline_id(),
+        }
+
+    snapshot = await asyncio.to_thread(_snapshot)
+    await _app.broadcast(make_event("pipelines.changed", {**snapshot, "reason": reason}))
+    return snapshot
+
+
+async def _publish_stages(pipeline_id: str, reason: str) -> dict[str, Any]:
+    """Broadcast stages.changed for one pipeline and return what was sent."""
+    from agent_team_backend import app as _app
+    from agent_team_backend.ipc import make_event
+
+    def _snapshot() -> dict[str, Any]:
+        return {
+            "stages": _app.stages_store.list(pipeline_id or None),
+            "pipeline_id": pipeline_id or _app.stages_store.get_active_pipeline_id(),
+        }
+
+    snapshot = await asyncio.to_thread(_snapshot)
+    await _app.broadcast(make_event("stages.changed", {**snapshot, "reason": reason}))
+    return snapshot
+
+
+async def _publish_role_stage_changes(pipeline_ids: list[str], reason: str) -> None:
+    """Republish the stages of every pipeline a role edit rewrote.
+
+    Only role_key moved, so the stage counts are untouched and pipelines.changed
+    would say nothing new — the same reasoning as
+    ws_handlers._broadcast_stage_role_changes, whose events these match.
+    """
+    from agent_team_backend import app as _app
+    from agent_team_backend.ipc import make_event
+
+    if not pipeline_ids:
+        return
+
+    def _snapshot() -> list[tuple[str, list[dict[str, Any]]]]:
+        return [(pid, _app.stages_store.list(pid)) for pid in pipeline_ids]
+
+    for pipeline_id, stages in await asyncio.to_thread(_snapshot):
+        await _app.broadcast(make_event("stages.changed", {
+            "stages": stages,
+            "pipeline_id": pipeline_id,
+            "reason": reason,
+        }))
+
+
+@server.tool()
+async def pipeline_define(
+    ctx: Context,
+    op: str,
+    pipeline_id: str = "",
+    name: str = "",
+    workspace_path: str = "",
+) -> dict[str, Any]:
+    """Create, rename, delete or re-seed a pipeline TEMPLATE (not a run).
+
+    A pipeline is the template pipeline_start runs: a named, ordered set of
+    stages. This edits the template list itself; stage_define edits what is
+    inside one, and role_define the roles its slots are cast from. Nothing here
+    starts, stops or advances a run.
+
+    `op` selects the operation and decides which other arguments are required:
+
+    - "create"        — needs `name`. Adds an empty pipeline (no stages) and
+                        returns it with its generated id. It is not made
+                        active; use "set_active" for that, and stage_define
+                        with op "upsert" to give it stages — a pipeline with no
+                        stages cannot be run.
+    - "rename"        — needs `pipeline_id` and `name`. Renames in place; ids
+                        and stages are untouched.
+    - "delete"        — needs `pipeline_id`. DESTRUCTIVE, see below.
+    - "set_active"    — needs `pipeline_id`. Selects the template the Pipelines
+                        window shows and that pipeline_start uses when called
+                        with no pipeline_id of its own.
+    - "reset_builtin" — needs `pipeline_id`, and only "default" or
+                        "maintenance" have seed data. DESTRUCTIVE, see below.
+
+    `workspace_path` names the project whose run the guards check; it defaults
+    to your own pane's workspace, and a caller with no pane that passes nothing
+    gets no guard at all. Pass it when editing on behalf of another project.
+
+    What the destructive ops actually do to a run in progress:
+
+    - "delete" and "set_active" are REFUSED outright while that workspace has
+      a run in the running state (error_code "pipeline_running"). Abort the run
+      first if you mean it.
+    - "reset_builtin" replaces every stage of the pipeline with its seed set,
+      and is refused while the run in progress is using that pipeline — a run
+      records which pipeline it belongs to, and naming it explicitly does not
+      get past the guard.
+    - A deleted pipeline does not stop or rewind a run that was already
+      started: the run keeps its own recorded pipeline_id and the panes it has
+      already opened. What breaks is resuming it later, since the template it
+      names is gone. The last remaining pipeline cannot be deleted at all.
+    - Nothing here touches a run's recorded progress. Editing a template while
+      an unrelated workspace runs a different one is fine.
+
+    Returns {ok, op, pipelines, active_pipeline_id}, plus `pipeline` for the
+    ops that produce one ("create", "rename", "reset_builtin"). ok false
+    carries `error` and `error_code` — one of "bad_op", "missing_argument",
+    "pipeline_running", "not_found", "invalid" — and nothing was written.
+    """
+    caller = _resolve_caller(ctx)
+    op = str(op or "").strip()
+    if op not in _PIPELINE_DEFINE_OPS:
+        return _bad_op(op, _PIPELINE_DEFINE_OPS)
+    pipeline_id = str(pipeline_id or "").strip()
+    name = str(name or "").strip()
+    if op != "create" and not pipeline_id:
+        return _missing_arg(op, "pipeline_id")
+    if op in ("create", "rename") and not name:
+        return _missing_arg(op, "name")
+
+    from agent_team_backend import app as _app
+
+    workspace_path = await _definition_workspace(caller, workspace_path)
+    if op in ("delete", "set_active"):
+        if await asyncio.to_thread(_run_is_active, workspace_path):
+            return _run_in_progress(
+                "delete a pipeline" if op == "delete" else "switch pipeline"
+            )
+    elif op == "reset_builtin":
+        if await asyncio.to_thread(_stage_edit_blocked, workspace_path, pipeline_id):
+            return _run_in_progress("reset a pipeline's stages")
+
+    try:
+        if op == "create":
+            pipeline = await asyncio.to_thread(_app.stages_store.create_pipeline, name)
+        elif op == "rename":
+            pipeline = await asyncio.to_thread(
+                _app.stages_store.rename_pipeline, pipeline_id, name
+            )
+        elif op == "delete":
+            await asyncio.to_thread(_app.stages_store.delete_pipeline, pipeline_id)
+            pipeline = None
+        elif op == "set_active":
+            await asyncio.to_thread(_app.stages_store.set_active_pipeline, pipeline_id)
+            pipeline = None
+        else:
+            pipeline = await asyncio.to_thread(
+                _app.stages_store.reset_builtin, pipeline_id
+            )
+    except (KeyError, ValueError) as exc:
+        return _store_refused(exc)
+
+    answer: dict[str, Any] = {"ok": True, "op": op}
+    answer.update(await _publish_pipelines(op))
+    # reset_builtin replaced the stage list as well, so the stage view has to
+    # be republished too — the ws handler broadcasts both for the same reason.
+    if op == "reset_builtin":
+        await _publish_stages(pipeline_id, "reset_builtin")
+    if pipeline is not None:
+        answer["pipeline"] = pipeline
+    return answer
+
+
+@server.tool()
+async def stage_define(
+    ctx: Context,
+    op: str,
+    pipeline_id: str = "",
+    stage_id: str = "",
+    stage: dict[str, Any] | None = None,
+    ids: list[str] | None = None,
+    workspace_path: str = "",
+) -> dict[str, Any]:
+    """Add, edit, remove, reorder or re-seed the STAGES inside one pipeline.
+
+    A stage is one step of a pipeline and holds the slots that become panes:
+    each slot names a CLI (agent_key) and a role (role_key) and carries the
+    kickoff text that pane is started with. pipeline_list shows the current
+    shape of every pipeline; this changes it.
+
+    `op` selects the operation and decides which other arguments are required:
+
+    - "upsert"  — needs `stage`, a full stage object. Matched by `stage["id"]`:
+                  an existing id is merged over (fields you omit keep their old
+                  values), a new one is appended at the end. The store requires
+                  `id` (alphanumeric, hyphen, underscore and dot only) and a
+                  non-empty `slots` list. A stage looks like
+                  {id, title, short_title, question, description, sentinel,
+                  recommended_roles, allow_questions, doc_query, slots}, and
+                  each slot {agent_key, role_key, label, kickoff_body,
+                  is_commander}. Read one out of pipeline_list first and edit
+                  that shape rather than composing one blind — but note
+                  pipeline_list deliberately omits kickoff_body, so an upsert
+                  built from it alone would blank the kickoffs of the slots it
+                  rewrites.
+    - "delete"  — needs `stage_id`. Refused for the last remaining stage of a
+                  pipeline.
+    - "reorder" — needs `ids`, the stage ids in the order you want. Ids not
+                  listed keep their relative order at the end, unknown ids and
+                  duplicates are ignored. The order IS the run order.
+    - "reset"   — takes no extra argument. DESTRUCTIVE, see below.
+
+    `pipeline_id` picks which pipeline to edit; left empty it means the active
+    one, which is what the Pipelines window has selected and not necessarily
+    the one you were reading. Name it.
+
+    `workspace_path` names the project whose run the guard checks; it defaults
+    to your own pane's workspace.
+
+    What this does to a run in progress: EVERY op here is refused while the
+    workspace has a run using this pipeline (error_code "pipeline_running") —
+    a run compares against the pipeline it recorded at start, so naming that
+    pipeline explicitly does not slip past. That is the whole protection: a
+    stage list edited mid-run would change the flow underneath the run. Runs in
+    other workspaces, or on other pipelines, are unaffected — and an edit
+    landing between two runs changes what the NEXT one does, silently, which is
+    the case to warn the user about.
+
+    "reset" throws away every stage of the pipeline and puts back the seed set:
+    the built-in stages for "default" and "maintenance", and NOTHING AT ALL for
+    a pipeline you created — a custom pipeline reset this way is left empty and
+    unrunnable, and there is no undo. Read it out of pipeline_list first if you
+    might want it back.
+
+    Returns {ok, op, stages, pipeline_id, pipelines, active_pipeline_id}, plus
+    `stage` for "upsert". ok false carries `error` and `error_code` — one of
+    "bad_op", "missing_argument", "pipeline_running", "not_found", "invalid" —
+    and nothing was written.
+    """
+    caller = _resolve_caller(ctx)
+    op = str(op or "").strip()
+    if op not in _STAGE_DEFINE_OPS:
+        return _bad_op(op, _STAGE_DEFINE_OPS)
+    pipeline_id = str(pipeline_id or "").strip()
+    stage_id = str(stage_id or "").strip()
+    if op == "upsert" and not isinstance(stage, dict):
+        return _missing_arg(op, "stage (a stage object)")
+    if op == "delete" and not stage_id:
+        return _missing_arg(op, "stage_id")
+    if op == "reorder" and not ids:
+        return _missing_arg(op, "ids (the stage ids in the wanted order)")
+
+    from agent_team_backend import app as _app
+
+    workspace_path = await _definition_workspace(caller, workspace_path)
+    if await asyncio.to_thread(_stage_edit_blocked, workspace_path, pipeline_id):
+        return _run_in_progress(f"{op} stages")
+
+    try:
+        if op == "upsert":
+            written = await asyncio.to_thread(
+                _app.stages_store.upsert, dict(stage or {}), pipeline_id or None
+            )
+        elif op == "delete":
+            await asyncio.to_thread(
+                _app.stages_store.delete, stage_id, pipeline_id or None
+            )
+            written = None
+        elif op == "reorder":
+            await asyncio.to_thread(
+                _app.stages_store.reorder, [str(i) for i in ids or []], pipeline_id or None
+            )
+            written = None
+        else:
+            await asyncio.to_thread(_app.stages_store.reset, pipeline_id or None)
+            written = None
+    except (KeyError, ValueError) as exc:
+        return _store_refused(exc)
+
+    answer: dict[str, Any] = {"ok": True, "op": op}
+    answer.update(await _publish_stages(pipeline_id, op))
+    # The pipeline summaries carry stage_count, so they go out too.
+    answer.update(await _publish_pipelines(f"stage_{op}"))
+    if written is not None:
+        answer["stage"] = written
+    return answer
+
+
+@server.tool()
+async def role_define(
+    ctx: Context,
+    op: str,
+    key: str = "",
+    new_key: str = "",
+    label: str = "",
+    one_line: str = "",
+    system_prompt: str = "",
+) -> dict[str, Any]:
+    """Create, edit, rename, delete or re-seed the ROLES pipeline slots cast from.
+
+    A role is a named system prompt: a stage slot names one by `role_key`, and
+    the pane that slot opens is started with that role's prompt. Roles are
+    global to the machine, not per pipeline and not per workspace, so an edit
+    here reaches every pipeline that names the role. pipeline_list lists the
+    roles that exist (key, label, one_line) but never their prompt bodies.
+
+    `op` selects the operation and decides which other arguments are required:
+
+    - "upsert" — needs `key`, `label` and `system_prompt`; `one_line` is the
+                 short description shown next to the label. An existing key is
+                 overwritten, a new one created. `key` must be lowercase
+                 letters, digits, underscore or dash, 1-32 characters.
+                 REPLACES the whole role: label and system_prompt you do not
+                 pass are not kept, they are written blank — and blank is
+                 refused, which is the only thing stopping a partial upsert
+                 from erasing a prompt.
+    - "rename" — needs `key` (the current one) and `new_key`. Renames in one
+                 step and repoints every stage slot that named the old key, so
+                 there is no intermediate state where slots point at nothing.
+                 `label` / `one_line` / `system_prompt` are optional here: what
+                 you omit is carried over from the existing role. Refused if
+                 `key` does not exist, or if `new_key` is already taken —
+                 merging two roles would silently drop one side's prompt.
+    - "delete" — needs `key`. REFUSED while any stage slot still names the
+                 role, and the refusal lists those slots in `usages` so you can
+                 repoint them (stage_define op "upsert") or rename instead. A
+                 slot pointing at a deleted role fails role injection and
+                 leaves that stage's pane sitting at an empty prompt with
+                 nothing on screen to say why — which is what the refusal is
+                 for. The last remaining role cannot be deleted at all.
+    - "reset"  — takes no extra argument. DESTRUCTIVE: throws away every role,
+                 custom ones included, and puts back the built-in set. Slots
+                 left naming a role the seed set does not have are then blanked
+                 rather than left dangling, so pipelines survive but those
+                 slots lose their role and must be re-cast. There is no undo.
+
+    Roles have no run guard: unlike stages, editing one is allowed while a
+    pipeline runs. A pane already started keeps the prompt it was given — the
+    change reaches the next pane opened for that slot, not the ones on screen.
+
+    Returns {ok, op, roles}, plus `role` for "upsert" and "rename", and
+    `repointed_pipeline_ids` for "rename". ok false carries `error` and
+    `error_code` — one of "bad_op", "missing_argument", "not_found",
+    "role_key_exists", "role_in_use", "invalid" — and nothing was written.
+    """
+    # Credential checked and then discarded: roles are global to the machine,
+    # so unlike the other two there is no workspace for the caller to pick.
+    _resolve_caller(ctx)
+    op = str(op or "").strip()
+    if op not in _ROLE_DEFINE_OPS:
+        return _bad_op(op, _ROLE_DEFINE_OPS)
+    key = str(key or "").strip()
+    new_key = str(new_key or "").strip()
+    if op != "reset" and not key:
+        return _missing_arg(op, "key")
+    if op == "upsert" and not label.strip():
+        return _missing_arg(op, "label")
+    if op == "upsert" and not system_prompt.strip():
+        return _missing_arg(op, "system_prompt")
+    if op == "rename" and not new_key:
+        return _missing_arg(op, "new_key")
+
+    from agent_team_backend import app as _app
+    from agent_team_backend.ipc import make_event
+
+    if op == "upsert":
+        try:
+            role = await asyncio.to_thread(
+                lambda: _app.roles_store.upsert(
+                    key=key,
+                    label=label,
+                    one_line=one_line,
+                    system_prompt=system_prompt,
+                )
+            )
+        except (KeyError, ValueError) as exc:
+            return _store_refused(exc)
+        roles = await asyncio.to_thread(_app.roles_store.list)
+        await _app.broadcast(make_event("roles.changed", {"roles": roles, "reason": "upsert"}))
+        return {"ok": True, "op": op, "role": role, "roles": roles}
+
+    if op == "rename":
+        existing = await asyncio.to_thread(_app.roles_store.get, key)
+        if existing is None:
+            return {
+                "ok": False,
+                "error": f"no such role: {key!r}",
+                "error_code": "not_found",
+            }
+        if new_key != key and await asyncio.to_thread(_app.roles_store.get, new_key):
+            return {
+                "ok": False,
+                "error": f"role {new_key!r} already exists",
+                "error_code": "role_key_exists",
+            }
+
+        # Carry the prompt across unless the caller deliberately replaced it:
+        # roles_store.upsert refuses a blank label or system_prompt, so a
+        # rename that passed the arguments through untouched would fail on
+        # every role whose text the caller did not happen to resend.
+        next_label = label.strip() or str(existing.get("label", ""))
+        next_one_line = one_line.strip() or str(existing.get("one_line", ""))
+        next_prompt = system_prompt.strip() or str(existing.get("system_prompt", ""))
+
+        def _rename() -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
+            role = _app.roles_store.upsert(
+                key=new_key,
+                label=next_label,
+                one_line=next_one_line,
+                system_prompt=next_prompt,
+            )
+            # The stores' locks are taken one after the other, never nested —
+            # the same ordering ws_handlers.roles_rename keeps.
+            touched = _app.stages_store.repoint_role_references(key, new_key)
+            if new_key != key:
+                _app.roles_store.delete(key)
+            return role, touched, _app.roles_store.list()
+
+        try:
+            role, touched, roles = await asyncio.to_thread(_rename)
+        except (KeyError, ValueError) as exc:
+            return _store_refused(exc)
+        await _app.broadcast(make_event("roles.changed", {"roles": roles, "reason": "rename"}))
+        await _publish_role_stage_changes(touched, "role_rename")
+        return {
+            "ok": True,
+            "op": op,
+            "role": role,
+            "roles": roles,
+            "repointed_pipeline_ids": touched,
+        }
+
+    if op == "delete":
+        # Ask before stranding the slots that name it, exactly as roles.delete
+        # does, and hand the caller the slots so it can offer to edit them.
+        usages = await asyncio.to_thread(_app.stages_store.find_role_usages, key)
+        if usages:
+            return {
+                "ok": False,
+                "error": (
+                    f"role {key!r} is still used by {len(usages)} pipeline stage "
+                    "slot(s); repoint or rename them first"
+                ),
+                "error_code": "role_in_use",
+                "usages": usages,
+            }
+        try:
+            roles = await asyncio.to_thread(_app.roles_store.delete, key)
+        except (KeyError, ValueError) as exc:
+            return _store_refused(exc)
+        await _app.broadcast(make_event("roles.changed", {"roles": roles, "reason": "delete"}))
+        return {"ok": True, "op": op, "roles": roles}
+
+    roles = await asyncio.to_thread(_app.roles_store.reset)
+    await _app.broadcast(make_event("roles.changed", {"roles": roles, "reason": "reset"}))
+
+    # Blank the slots left naming a role the seed set dropped; the surviving
+    # keys are read first and handed to the stages store, so the two stores'
+    # locks are taken one after the other (ws_handlers._clear_dangling_role_refs).
+    def _clear_dangling() -> list[str]:
+        valid = {str(r.get("key", "")) for r in _app.roles_store.list()}
+        return _app.stages_store.clear_missing_role_references(valid)
+
+    await _publish_role_stage_changes(await asyncio.to_thread(_clear_dangling), "roles_reset")
+    return {"ok": True, "op": op, "roles": roles}
+
+
+# ── Pipelines: driving a run that is already going ──────────────────────────
+# Same reason pipeline_start and pipeline_abort go through the window: the
+# renderer owns the orchestration — it watches the panes, decides a stage is
+# finished and spawns the next one. These four are the buttons the user has,
+# addressed by MCP.
+
+
+@server.tool()
+async def pipeline_next(ctx: Context, workspace_path: str = "") -> dict[str, Any]:
+    """Advance a running pipeline to its next stage now, without waiting.
+
+    THIS OPENS CLI PANES AND SPENDS THEIR QUOTA. Normally the window decides a
+    stage is finished by watching its panes; this says so on their behalf and
+    activates the next stage immediately, spawning a pane for each of its
+    slots. Work still in flight in the current stage is not waited for — its
+    output simply does not reach the stage that follows.
+
+    On the last stage there is nothing to advance to and this is REFUSED, not
+    quietly turned into a completion: a caller that asked to step forward must
+    not get a finished run back instead. Ending a run there is the window's own
+    job, or pipeline_abort's. pipeline_status shows current_stage_index and
+    total_stages, which is how to see that case coming before calling.
+
+    Returns the window's own reply — {ok, result, error}. ok false means
+    nothing advanced, the usual reason being that no run is in progress.
+
+    workspace_path defaults to your own pane's workspace; pass it only to drive
+    a run in another project's window.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    return await _ui_request(
+        workspace_path, "invoke", caller=caller, action="ui.pipeline.next", args={}
+    )
+
+
+@server.tool()
+async def pipeline_resume(ctx: Context, workspace_path: str = "") -> dict[str, Any]:
+    """Carry on a pipeline run that was aborted or interrupted, from where it stopped.
+
+    THIS OPENS CLI PANES AND SPENDS THEIR QUOTA. Resume is the other half of
+    pipeline_abort: the recorded run is picked back up at the stage after the
+    last finished one, and that stage's panes are spawned. Progress already
+    made is kept — this is the non-destructive way back into a run, unlike
+    pipeline_reset and pipeline_restart.
+
+    The run is resumed against the pipeline it was started with, switching the
+    active pipeline back if it has since changed; if that pipeline is gone or
+    its stages no longer reach the recorded index, the resume stops and says so
+    rather than running an unrelated stage against this run's task.
+
+    Returns the window's own reply — {ok, result, error}. ok false means
+    nothing resumed: no recorded run to resume, or one already running.
+    pipeline_status shows whether a run exists and what state it is in.
+
+    workspace_path defaults to your own pane's workspace; pass it only to
+    resume a run in another project's window.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    return await _ui_request(
+        workspace_path, "invoke", caller=caller, action="ui.pipeline.resume", args={}
+    )
+
+
+@server.tool()
+async def pipeline_reset(ctx: Context, workspace_path: str = "") -> dict[str, Any]:
+    """Clear the workspace back to idle: close EVERY pane and drop the run's progress.
+
+    DESTRUCTIVE, AND WIDER THAN IT SOUNDS. Unlike pipeline_abort, which pauses
+    the orchestration and leaves the panes alive to be resumed, reset tears
+    down every pane in the workspace — the ones the pipeline opened AND the
+    ones the user or another agent opened by hand — and returns the workspace
+    to an idle, empty state with the run's task, stage index and log cleared.
+    There is no resume afterwards and no undo.
+
+    Read pipeline_status first: it says whether a run is in progress and how
+    far it got, and cli_list_targets says which panes are about to be closed.
+    If the intent is only to stop the run, pipeline_abort keeps the work.
+
+    Returns the window's own reply — {ok, result, error}.
+
+    workspace_path defaults to your own pane's workspace; pass it only to reset
+    another project's window.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    return await _ui_request(
+        workspace_path, "invoke", caller=caller, action="ui.pipeline.reset", args={}
+    )
+
+
+@server.tool()
+async def pipeline_restart(ctx: Context, workspace_path: str = "") -> dict[str, Any]:
+    """Throw the current run away and run the same pipeline again from stage one.
+
+    DESTRUCTIVE, AND IT OPENS CLI PANES AND SPENDS THEIR QUOTA. Every pane the
+    pipeline opened is closed, the progress recorded for the run is discarded,
+    and the run starts over at the first stage with the same task — so the
+    stages that had already finished are paid for and run a second time. There
+    is no undo.
+
+    Read pipeline_status first: a run three stages in is three stages of work
+    to redo, and if the goal is only to move past a stuck stage then
+    pipeline_next costs nothing already spent.
+
+    Returns the window's own reply — {ok, result, error}. ok false means
+    nothing restarted, the usual reason being that the workspace has no run to
+    restart.
+
+    workspace_path defaults to your own pane's workspace; pass it only to
+    restart a run in another project's window.
+    """
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
+    return await _ui_request(
+        workspace_path, "invoke", caller=caller, action="ui.pipeline.restart", args={}
+    )
+
+
+# ── The CLI permission switch ───────────────────────────────────────────────
+# Global, not per project and not per pipeline: yolo feeds skipFlagFor() in the
+# renderer, which every spawn / resume / restore path calls, and it persists in
+# the user-level ui_settings under `agentTeam.yolo`. Which is why the renderer
+# leaves ui.settings.yolo out of WORKSPACE_SCOPED_ACTIONS — a window answers it
+# whatever project it happens to be showing, because there is no wrong project
+# for a global setting to land in. workspace_path here only picks the window.
+
+
+@server.tool()
+async def cli_permission_settings(
+    ctx: Context, yolo: bool | None = None, workspace_path: str = ""
+) -> dict[str, Any]:
+    """Read, or change, the global switch that lets CLIs skip their permission prompts.
+
+    "Yolo" is Navide's name for the permission-bypass flag it passes a CLI at
+    spawn (claude's --dangerously-skip-permissions and each vendor's
+    equivalent). It is ONE setting for the whole app — not per workspace, not
+    per pipeline, not per pane — stored with the user's settings and read by
+    every path that starts a CLI: new panes, pipeline slots, resumes and
+    restores alike.
+
+    Called with no argument it only reads. Passing `yolo` sets it, and the new
+    value applies to CLIs started AFTER the change; processes already running
+    keep the flags they were launched with, so turning it off does not reach
+    back into a pane that is already going.
+
+    WHAT TURNING IT ON MEANS: the CLIs Navide starts stop asking before they
+    edit files, run shell commands or make network calls in the user's
+    workspace, and act on their own judgement instead. That is the user's
+    call to make. Do not switch it on to get your own work past a prompt.
+
+    Returns {ok, result, error}; `result` is {yolo, agents}. `yolo` is the
+    global switch. `agents` is one entry per CLI vendor — {agent, mode,
+    skipFlag} — and it is the half that actually answers "will this CLI skip
+    its prompts":
+
+    - `mode` is that vendor's own override and BEATS the global switch:
+      "inherit" follows it, "force-on" and "force-off" ignore it. So `yolo`
+      true on its own does not mean every CLI bypasses, and `yolo` false does
+      not mean none does — reading only the switch will mislead you.
+    - `skipFlag` is the flag that vendor would actually be launched with right
+      now, and empty string means none. Vendors with no bypass flag at all
+      (grok, opencode, pi) are always empty here whatever the switch says.
+
+    Read `agents[].skipFlag` for the per-CLI answer; `yolo` is only the default
+    the ones on "inherit" fall back to.
+
+    `workspace_path` is ADDRESSING ONLY — it picks which window is asked, not
+    what the change applies to. The setting is one global value whichever
+    window reads or writes it, so every window gives the same answer and a
+    write through any of them reaches all of them. It defaults to your own
+    pane's window, and a caller with no pane that names nothing simply gets
+    whichever window is open. There is no per-project version of this setting
+    to reach by passing a different path.
+
+    ok false with error_code "ui_no_window" means no Navide window was open to
+    ask.
+    """
+    caller = _resolve_caller(ctx)
+    # Read-only unless the caller actually passed a value: an args dict that
+    # always carried the key would turn every read into a write of whatever
+    # the default happened to serialise to.
+    args: dict[str, Any] = {} if yolo is None else {"yolo": bool(yolo)}
+    # Soft resolve: unlike the pipeline tools this must not refuse a caller who
+    # has no workspace, because the setting does not belong to one. With
+    # nothing to address, is_global sends it to any one open window.
+    window_path = await _definition_workspace(caller, workspace_path)
+    return await _ui_request(
+        window_path,
+        "invoke",
+        caller=caller,
+        action="ui.settings.yolo",
+        args=args,
+        is_global=not window_path,
+    )
+
+
+
+# ── Resources: the same read-only surfaces, addressed by URI ────────────────
+# An MCP client lists and reads resources on the user's behalf — attaching one
+# to a conversation is something they do, not something an agent is talked
+# into. So these three are strictly read-only, and each is a view of data a
+# tool already serves rather than a second implementation of it.
+#
+# The credential is not injected here. A resource function that declares a
+# Context parameter and NO uri parameter is registered by the SDK as a
+# *template* (the decorator branches on "has any parameters", not on "has uri
+# parameters"), and a template with no parameters never matches its own uri:
+# its matcher hands back an empty parameter dict, which the resource manager
+# reads as "no match" — the resource becomes unreadable, with "Unknown
+# resource" as the only symptom. So a parameterless resource takes its context
+# from :meth:`FastMCP.get_context` instead, which returns the very object the
+# decorator would have injected; the templated one, which has a uri parameter,
+# takes the injected Context. Both reach the same authenticated HTTP request,
+# so `_resolve_caller` applies to a resource read exactly as it does to a tool
+# call, and an unwired caller is refused the same way.
+
+
+@server.resource(
+    "navide://workspace/plans",
+    name="workspace_plans",
+    title="Plans in this workspace",
+    description=(
+        "Index of the plan documents in your workspace's .agent-team/plans/ "
+        "directory — the same listing plan_list returns, as JSON."
+    ),
+    mime_type="application/json",
+)
+async def workspace_plans_resource() -> dict[str, Any]:
+    """The workspace's plan index, for a client that reads resources."""
+    from agent_team_backend.plugins.builtin.navide_plans import plan_tools
+
+    ctx = server.get_context()
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, "")
+    return {"workspace_path": workspace_path, "plans": await plan_tools.plan_list(ctx)}
+
+
+@server.resource(
+    "navide://workspace/plan/{rel_path}",
+    name="workspace_plan",
+    title="One plan document",
+    description=(
+        "One plan document from your workspace's .agent-team/plans/ directory: "
+        "{rel_path, meta, html}. rel_path is the document's bare filename — a "
+        "uri template matches one path segment, so the full "
+        "'.agent-team/plans/<file>' form has to be percent-encoded."
+    ),
+    mime_type="application/json",
+)
+async def workspace_plan_resource(rel_path: str, ctx: Context) -> dict[str, Any]:
+    """One plan document, read through plan_read's own path guard.
+
+    ``rel_path`` arrives percent-encoded (a uri template segment cannot carry a
+    raw "/"), and is decoded before it is resolved. Decoding is what makes the
+    guard load-bearing rather than decorative: `%2E%2E%2F` is `../` by the time
+    it reaches the filesystem, so this must not resolve the path itself —
+    plan_read's ``_plan_target`` does, and refuses anything that leaves the
+    plans subtree.
+    """
+    from agent_team_backend.plugins.builtin.navide_plans import plan_tools
+
+    return await plan_tools.plan_read(unquote(str(rel_path or "")), ctx)
+
+
+@server.resource(
+    "navide://panes",
+    name="panes",
+    title="Addressable CLI panes",
+    description=(
+        "The CLI panes you can send instructions to — the same roster "
+        "cli_list_targets returns, as JSON."
+    ),
+    mime_type="application/json",
+)
+async def panes_resource() -> dict[str, Any]:
+    """The addressable-pane roster, for a client that reads resources."""
+    return await cli_list_targets(server.get_context())
+
+
+# ── Prompts: templates the USER fills in and sends ──────────────────────────
+# A prompt is not documentation for the model — a client surfaces these to the
+# person, usually as a slash command, and what comes back is inserted into
+# their message. So each one renders a filled-in instruction that stands on its
+# own when sent, not an explanation of how the tools work.
+
+
+@server.prompt(
+    title="Delegate a task to another pane",
+    description="Hand a task to another Navide CLI pane and ask to be told when it lands.",
+)
+def delegate_to_pane(target: str, task: str) -> str:
+    """Delegate `task` to the pane addressed by `target`, with a report back."""
+    return (
+        f"Send this task to the CLI pane `{target}` with cli_send, then stop and "
+        f"wait for its reply rather than doing the work yourself.\n\n"
+        f"Task for {target}:\n"
+        f"{task}\n\n"
+        f"Address it exactly as `{target}` — run cli_list_targets first if that "
+        f"address is not in the roster, and ask me which pane I meant rather "
+        f"than guessing at a similar name. In the message you send, tell "
+        f"{target} to report back to you with cli_send when it is done: what it "
+        f"changed, how it verified it, and anything it decided that I should "
+        f"know about. Then tell me the message is away, and pass its report on "
+        f"to me when it arrives."
+    )
+
+
+@server.prompt(
+    title="Start a pipeline run",
+    description="Run this workspace's pipeline against a task, after checking what it will open.",
+)
+def start_pipeline(task: str) -> str:
+    """Start a pipeline run for `task`, with the pre-flight checks first."""
+    return (
+        f"Start a pipeline run in this workspace for the following task:\n\n"
+        f"{task}\n\n"
+        f"Before starting it: read pipeline_status to make sure no run is "
+        f"already in progress, and pipeline_list to see which pipeline would "
+        f"run and which stages it opens. Tell me what it is about to open — "
+        f"this spends CLI quota — and wait for me to say go. Then call "
+        f"pipeline_start with the task above, report whether the run actually "
+        f"started, and if it did not, say what the window gave as the reason."
+    )
+
+
+@server.prompt(
+    title="Review a plan document",
+    description="Read a plan document, review it, and leave the findings on it as review notes.",
+)
+def review_plan(rel_path: str) -> str:
+    """Review the plan at `rel_path` and record the findings on the document."""
+    return (
+        f"Review the plan document `{rel_path}`.\n\n"
+        f"Read it with plan_read first. Then go through it as a reviewer: is "
+        f"the goal stated clearly enough to tell whether it has been met, does "
+        f"each phase have a verification that would actually fail if the work "
+        f"were wrong, what is missing, and what would you do differently. Check "
+        f"the claims against the code where the plan makes any.\n\n"
+        f"Record each finding on the document itself with plan_add_note — one "
+        f"note per finding, specific enough to act on — rather than only "
+        f"telling me here. Then summarise for me what you left on it, and say "
+        f"whether the plan is ready to approve as it stands."
+    )
 
 
 # ── ASGI mount + lifecycle ──────────────────────────────────────────────────

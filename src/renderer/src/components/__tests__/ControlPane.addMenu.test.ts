@@ -33,7 +33,7 @@ const workspaceRow = {
   displayPath: '~/Desktop/Agent-Team',
   isCurrent: true,
   collapsed: false,
-  count: 1,
+  count: 1, paneIds: [],
   lineage: [],
   // The sidebar renders through the group sections; a row without them shows
   // no panes. One ungrouped section is what an untouched workspace looks like.
@@ -267,7 +267,7 @@ describe('ControlPane – the ＋ menu', () => {
         { ...workspaceRow, lineage: [] },
         {
           path: '/Users/me/Desktop/Other', label: 'Other', displayPath: '~/Desktop',
-          isCurrent: true, collapsed: false, count: 0, lineage: [],
+          isCurrent: true, collapsed: false, count: 0, paneIds: [], lineage: [],
           groups: [{ id: '', name: '', rows: [] }], remote: []
         }
       ]
@@ -288,7 +288,7 @@ describe('ControlPane – the ＋ menu', () => {
         { ...workspaceRow, lineage: [] },
         {
           path: '/Users/me/Desktop/Other', label: 'Other', displayPath: '~/Desktop',
-          isCurrent: true, collapsed: false, count: 0, lineage: [],
+          isCurrent: true, collapsed: false, count: 0, paneIds: [], lineage: [],
           groups: [{ id: '', name: '', rows: [] }], remote: []
         }
       ]
