@@ -113,6 +113,8 @@ class PaneRecord:
     session_home_id: str = ""       # Codex per-pane CODEX_HOME id; stable across restored pane ids
     profile_id: str = ""            # CLI account pin: the profile this pane was spawned on ("__default__" = real home; "" = legacy/unpinned). Restore re-spawns in the SAME account regardless of the current active default.
     spawn_status: str = "pending"   # pending / spawned / removed
+    spawned_at: str = ""            # ISO8601 UTC of the FIRST real spawn; set once, so a restore or a repeat marking keeps the original time. "" = written before this field existed (unknown — never back-filled with now(), the UI shows "—")
+    removed_at: str = ""            # ISO8601 UTC of the last removal; overwritten on each removal (only the final one matters). "" = still live, or written before this field existed
     run_group_id: str = ""
     origin: str = "manual"          # "pipeline" | "manual" | "mcp"  (non-pipeline records are matched with != "pipeline")
     spawned_by: str = ""            # pane_id of the parent that spawned this pane; "" = root. Re-keyed on restore alongside pane_id — a stale value is worse than none (see _rekey_spawned_by).
@@ -664,6 +666,7 @@ class ProjectStore:
             self._rekey_spawned_by(project, pane.pane_id, pane_id)
         pane.pane_id = pane_id
         pane.spawn_status = "spawned"
+        if not pane.spawned_at: pane.spawned_at = _now_iso()
         if agent: pane.agent = agent
         if role: pane.role = role
         # Claude pins its session id at spawn; Codex/Gemini use record_slot_session() later.
@@ -707,6 +710,7 @@ class ProjectStore:
             return project
         self._adopt_orphans(project, pane)
         pane.spawn_status = "removed"
+        pane.removed_at = _now_iso()
         pane.kickoff_status = "none"
         self.save(project)
         self.append_event(
@@ -842,6 +846,9 @@ class ProjectStore:
         pane.role = role
         pane.command = command
         pane.spawn_status = "spawned"
+        # Set once: the rebuild path re-spawns an existing record, and the pane
+        # the user is looking at started at the ORIGINAL time, not this hop.
+        if not pane.spawned_at: pane.spawned_at = _now_iso()
         if session_id: pane.session_id = session_id
         if session_home_id: pane.session_home_id = session_home_id
         if profile_id: pane.profile_id = profile_id
@@ -867,6 +874,7 @@ class ProjectStore:
                         and other.session_id == session_id
                         and other.spawn_status == "spawned"):
                     other.spawn_status = "removed"
+                    other.removed_at = _now_iso()
         self.save(project)
         self.append_event(
             workspace_path,
@@ -912,6 +920,7 @@ class ProjectStore:
         for pane in matches:
             self._adopt_orphans(project, pane)
             pane.spawn_status = "removed"
+            pane.removed_at = _now_iso()
         self.save(project)
         self.append_event(
             workspace_path,
