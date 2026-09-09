@@ -582,6 +582,7 @@ class StagesStore:
             active_pipeline_id = clean_pipelines[0]["id"]
         doc = {
             "version": 2,
+            "schemaVersion": SCHEMA_VERSION,
             "active_pipeline_id": active_pipeline_id,
             "pipelines": clean_pipelines,
         }
@@ -590,7 +591,6 @@ class StagesStore:
         return doc
 
     def create_pipeline(self, name: str) -> dict[str, Any]:
-        doc = self._read_doc()
         pid = uuid.uuid4().hex[:8]
         new_pipeline: dict[str, Any] = {
             "id": pid,
@@ -598,8 +598,10 @@ class StagesStore:
             "builtin": False,
             "stages": [],
         }
-        doc["pipelines"].append(new_pipeline)
-        self._write_doc(doc)
+        with self._lock:
+            doc = self._read_doc()
+            doc["pipelines"].append(new_pipeline)
+            self._write_doc(doc)
         return {
             "id": new_pipeline["id"],
             "name": new_pipeline["name"],
@@ -608,10 +610,16 @@ class StagesStore:
         }
 
     def rename_pipeline(self, pipeline_id: str, name: str) -> dict[str, Any]:
-        doc = self._read_doc()
-        pipeline = self._get_pipeline(doc, pipeline_id)
-        pipeline["name"] = name.strip() or pipeline["name"]
-        self._write_doc(doc)
+        # A blank id means "the active pipeline" to _get_pipeline, which for the
+        # stage CRUD is the point but here would rename whatever happens to be
+        # active instead of what the caller asked for.
+        if not pipeline_id:
+            raise KeyError("pipeline id is required")
+        with self._lock:
+            doc = self._read_doc()
+            pipeline = self._get_pipeline(doc, pipeline_id)
+            pipeline["name"] = name.strip() or pipeline["name"]
+            self._write_doc(doc)
         return {
             "id": pipeline["id"],
             "name": pipeline["name"],
@@ -620,48 +628,143 @@ class StagesStore:
         }
 
     def delete_pipeline(self, pipeline_id: str) -> list[dict[str, Any]]:
-        doc = self._read_doc()
-        self._get_pipeline(doc, pipeline_id)  # raises KeyError if not found
-        if len(doc.get("pipelines", [])) <= 1:
-            raise ValueError("cannot delete the last remaining pipeline")
-        doc["pipelines"] = [p for p in doc["pipelines"] if p["id"] != pipeline_id]
-        # Fallback active_pipeline_id if the deleted one was active
-        if doc.get("active_pipeline_id") == pipeline_id:
-            fallback = next(
-                (p["id"] for p in doc["pipelines"] if p["id"] == "default"), None
-            )
-            if not fallback and doc["pipelines"]:
-                fallback = doc["pipelines"][0]["id"]
-            doc["active_pipeline_id"] = fallback or "default"
-        self._write_doc(doc)
+        # Without this a blank id passes the _get_pipeline check (it resolves to
+        # the active pipeline) and then matches nothing to remove, so the caller
+        # is told the delete succeeded while nothing was deleted.
+        if not pipeline_id:
+            raise KeyError("pipeline id is required")
+        with self._lock:
+            doc = self._read_doc()
+            self._get_pipeline(doc, pipeline_id)  # raises KeyError if not found
+            if len(doc.get("pipelines", [])) <= 1:
+                raise ValueError("cannot delete the last remaining pipeline")
+            doc["pipelines"] = [p for p in doc["pipelines"] if p["id"] != pipeline_id]
+            # Fallback active_pipeline_id if the deleted one was active
+            if doc.get("active_pipeline_id") == pipeline_id:
+                fallback = next(
+                    (p["id"] for p in doc["pipelines"] if p["id"] == "default"), None
+                )
+                if not fallback and doc["pipelines"]:
+                    fallback = doc["pipelines"][0]["id"]
+                doc["active_pipeline_id"] = fallback or "default"
+            self._write_doc(doc)
         return self.list_pipelines()
 
     def set_active_pipeline(self, pipeline_id: str) -> str:
-        doc = self._read_doc()
-        if not any(p["id"] == pipeline_id for p in doc.get("pipelines", [])):
-            raise KeyError(f"pipeline not found: {pipeline_id}")
-        doc["active_pipeline_id"] = pipeline_id
-        self._write_doc(doc)
+        with self._lock:
+            doc = self._read_doc()
+            if not any(p["id"] == pipeline_id for p in doc.get("pipelines", [])):
+                raise KeyError(f"pipeline not found: {pipeline_id}")
+            doc["active_pipeline_id"] = pipeline_id
+            self._write_doc(doc)
         return pipeline_id
 
     def reset_builtin(self, pipeline_id: str) -> dict[str, Any]:
-        doc = self._read_doc()
-        pipeline = self._get_pipeline(doc, pipeline_id)
-        if not pipeline.get("builtin"):
-            raise ValueError(f"pipeline is not builtin: {pipeline_id}")
-        if pipeline_id == "default":
-            pipeline["stages"] = default_stages()
-        elif pipeline_id == "maintenance":
-            pipeline["stages"] = default_maintenance_stages()
-        else:
-            raise ValueError(f"no seed data for builtin pipeline: {pipeline_id}")
-        self._write_doc(doc)
+        with self._lock:
+            doc = self._read_doc()
+            pipeline = self._get_pipeline(doc, pipeline_id)
+            if not pipeline.get("builtin"):
+                raise ValueError(f"pipeline is not builtin: {pipeline_id!r}")
+            # Matched against the requested id, not the resolved pipeline: a
+            # blank id resolves to the active pipeline in _get_pipeline above but
+            # matches neither seed here, so it lands in the else and writes
+            # nothing. Quoting the id is what makes that visible in the message.
+            if pipeline_id == "default":
+                pipeline["stages"] = default_stages()
+            elif pipeline_id == "maintenance":
+                pipeline["stages"] = default_maintenance_stages()
+            else:
+                raise ValueError(f"no seed data for builtin pipeline: {pipeline_id!r}")
+            self._write_doc(doc)
         return {
             "id": pipeline["id"],
             "name": pipeline["name"],
             "builtin": pipeline.get("builtin", False),
             "stage_count": len(pipeline.get("stages", [])),
         }
+
+    # ── Role references ───────────────────────────────────────────────────────
+
+    def find_role_usages(self, role_key: str) -> list[dict[str, Any]]:
+        """Every stage slot naming this role, across all pipelines.
+
+        Deleting a role that a slot still names leaves that slot pointing at
+        nothing, which the renderer can only report as a failed pane, so
+        roles.delete asks first and refuses.
+        """
+        if not role_key:
+            return []
+        doc = self._read_doc()
+        usages: list[dict[str, Any]] = []
+        for pipeline in doc.get("pipelines", []):
+            for stage in pipeline.get("stages", []):
+                for slot in stage.get("slots") or []:
+                    if slot.get("role_key") != role_key:
+                        continue
+                    usages.append({
+                        "pipeline_id": pipeline.get("id", ""),
+                        "pipeline_name": pipeline.get("name", ""),
+                        "stage_id": stage.get("id", ""),
+                        "stage_title": stage.get("title", ""),
+                        "slot_label": slot.get("label", ""),
+                    })
+        return usages
+
+    def repoint_role_references(self, old_key: str, new_key: str) -> list[str]:
+        """Move every slot naming old_key onto new_key; return changed pipeline ids.
+
+        Renaming a role is add-then-remove underneath, and the remove is refused
+        while a slot still names the old key, so the references have to move in
+        between. Same lock shape as clear_missing_role_references: this store's
+        lock only, never held across a call into the roles store.
+        """
+        if not old_key or old_key == new_key:
+            return []
+        touched: list[str] = []
+        with self._lock:
+            doc = self._read_doc()
+            for pipeline in doc.get("pipelines", []):
+                changed = False
+                for stage in pipeline.get("stages", []):
+                    for slot in stage.get("slots") or []:
+                        if slot.get("role_key") == old_key:
+                            slot["role_key"] = new_key
+                            changed = True
+                if changed:
+                    touched.append(pipeline.get("id", ""))
+            if touched:
+                self._write_doc(doc)
+        return touched
+
+    def clear_missing_role_references(
+        self, valid_role_keys: set[str]
+    ) -> list[str]:
+        """Blank every slot role_key outside valid_role_keys; return the ids of
+        the pipelines that changed.
+
+        For the role removals that cannot be refused (roles.reset, a settings
+        bundle import). An empty role_key is a state the renderer handles —
+        role injection is skipped and the kickoff still goes out — while a key
+        naming a role that is gone strands the pane. The caller passes the keys
+        rather than the store reading them, so no roles lock is ever held while
+        this one is taken.
+        """
+        touched: list[str] = []
+        with self._lock:
+            doc = self._read_doc()
+            for pipeline in doc.get("pipelines", []):
+                changed = False
+                for stage in pipeline.get("stages", []):
+                    for slot in stage.get("slots") or []:
+                        key = slot.get("role_key") or ""
+                        if key and key not in valid_role_keys:
+                            slot["role_key"] = ""
+                            changed = True
+                if changed:
+                    touched.append(pipeline.get("id", ""))
+            if touched:
+                self._write_doc(doc)
+        return touched
 
     # ── Stage CRUD (pipeline-scoped) ──────────────────────────────────────────
 
@@ -702,8 +805,13 @@ class StagesStore:
             pipeline = self._get_pipeline(doc, pipeline_id)
             stages: list[dict[str, Any]] = pipeline.get("stages", [])
             by_id = {s["id"]: s for s in stages}
-            reordered = [by_id[sid] for sid in ids if sid in by_id]
-            mentioned = set(ids)
+            # An id listed twice must not produce two copies of the same stage.
+            mentioned: set[str] = set()
+            reordered: list[dict[str, Any]] = []
+            for sid in ids:
+                if sid in by_id and sid not in mentioned:
+                    mentioned.add(sid)
+                    reordered.append(by_id[sid])
             for s in stages:
                 if s["id"] not in mentioned:
                     reordered.append(s)
