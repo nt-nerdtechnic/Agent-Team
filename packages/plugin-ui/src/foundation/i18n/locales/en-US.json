@@ -2028,7 +2028,7 @@
     "backend-status": "backend {status}",
     "pipeline-name-placeholder": "Pipeline name…",
     "stage-count": "{count} stage(s)",
-    "pipeline-count": "{count} pipelines",
+    "pipeline-count": "{count} pipeline(s)",
     "builtin": "Built-in",
     "pipeline-definition-file": "Definition file",
     "loading-pipelines": "Loading pipelines…",

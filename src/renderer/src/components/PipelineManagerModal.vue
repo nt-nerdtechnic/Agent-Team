@@ -1291,6 +1291,19 @@ function buildAiContext(): string {
   background: var(--bg-selected);
   box-shadow: inset 3px 0 0 var(--accent-emphasis);
 }
+/* The house focus ring (semantic.css `.nv-btn:focus-visible`) is an inset
+   shadow rather than an outline, and the row needs it for the same reason: the
+   list scrolls, so an outline on the first or last row would be clipped. */
+.pl-item:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
+}
+/* Focus does not cost the selected row its locator rail. */
+.pl-item.pl-active:focus-visible {
+  box-shadow:
+    inset 3px 0 0 var(--accent-emphasis),
+    inset 0 0 0 2px var(--accent-focus);
+}
 .pl-name {
   font-weight: 600;
   min-width: 0;
@@ -1687,6 +1700,12 @@ button.small {
 .icon-btn:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+/* These are not `.nv-icon-btn`, so they do not inherit the family ring; a
+   keyboard user has to be able to see which glyph is focused. */
+.icon-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-focus);
 }
 .danger-icon {
   color: var(--danger-fg);

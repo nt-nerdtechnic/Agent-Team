@@ -106,6 +106,35 @@ describe('PipelineManagerModal list-view CSS', () => {
     expect(btn).not.toMatch(/padding: 2px 4px/)
   })
 
+  it('gives the focusable row the house focus ring', () => {
+    // `.pl-item` is a bare <li role="button">, so it inherits neither
+    // `.nv-btn:focus-visible` nor `.nv-icon-btn:focus-visible`. Inset shadow,
+    // not outline: the list scrolls, and an outline on the first or last row
+    // would be clipped by it.
+    const ring = block('.pl-item:focus-visible')
+    expect(ring).toContain('box-shadow: inset 0 0 0 2px var(--accent-focus)')
+    expect(ring).toContain('outline: none')
+    // The selected row keeps its locator rail while focused — both shadows.
+    const activeRing = block('.pl-item.pl-active:focus-visible')
+    expect(activeRing).toContain('inset 3px 0 0 var(--accent-emphasis)')
+    expect(activeRing).toContain('inset 0 0 0 2px var(--accent-focus)')
+  })
+
+  it('gives the icon button a focus ring of its own', () => {
+    const ring = block('.icon-btn:focus-visible')
+    expect(ring).toContain('box-shadow: inset 0 0 0 2px var(--accent-focus)')
+  })
+
+  // Regression guard, not a proof of a fix: this already held before the
+  // redesign (the inputs swap the outline for an accent border). It exists so
+  // that no later edit strips the ring out of the two rules above.
+  it('never kills a focus outline without replacing the affordance', () => {
+    const suppressors = (style.match(/[^}]*outline:\s*none[^}]*}/g) ?? []).filter(
+      (rule) => !/box-shadow:|border-color:/.test(rule)
+    )
+    expect(suppressors, 'outline removed with nothing visible to replace it').toEqual([])
+  })
+
   it('dashes the empty/error container so it reads as a placeholder', () => {
     const empty = block('.pl-empty')
     expect(empty).toContain('border: 1px dashed var(--border-default)')
