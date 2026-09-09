@@ -54,10 +54,10 @@ having no tab group: `cli_send`'s `to: "group"` broadcast is refused with
 to fan out to nor a window to ask about one. Address the panes individually, or
 by `pane_id`.
 
-Implementation: [`plan_mcp.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py)
-(tools), [`plan_mcp_auth.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp_auth.py)
+Implementation: [`mcp_server/server.py`](../../backend/agent_team_backend/mcp_server/server.py)
+(tools), [`mcp_server/auth.py`](../../backend/agent_team_backend/mcp_server/auth.py)
 (credential store, `plan_mcp_auth.json` under the app data directory), and
-[`plan_mcp_wiring.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp_wiring.py)
+[`mcp_server/wiring.py`](../../backend/agent_team_backend/mcp_server/wiring.py)
 (pane/host wiring — not needed for an external client).
 
 ## Tool catalog
@@ -105,6 +105,7 @@ documents the addresses, the idle gate and the guard rails they share.
 | `cli_read_incoming` | `uid=""`, `limit=5` (capped at 20), `include_delivered=false`, `peek=false` | **CLI panes only.** The full text of messages sent to you, where `cli_pending_incoming` gives 200 characters with the whitespace flattened: `{count, messages: [{uid, sender, status, kind?, content, age_seconds, consumed, correlation_id?, in_reply_to?, hold?, held_for_s?, stale?}], note?}`. **Reading consumes by default** — a message you read is not typed into your pane afterwards. `peek: true` reads without consuming. Consuming is reserve-then-release, so a lost release returns the message to the queue and it may arrive a second time; `consumed` is reported per message and `note` explains any that were not |
 | `cli_send_and_wait` | `to`, `text`, `timeout_s=60` (capped at 120), `pane_id?` | `cli_send` plus the wait for that turn to finish; returns `cli_wait_idle`'s result plus `{ok, target, msg_key}`  **Remote panes**: send and delivery gate work as they do locally (`rejected` stays distinct from `failed`); the wait half uses the roster badge with the same weaknesses as `cli_wait_idle`. |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path` (required for a non-pane caller), `model`, `effort` | Spawn a new CLI pane with a task; returns `{ok, name, address, pane_id}`, plus `advisories` when the spawn crossed an advisory threshold. `model` and `effort` are optional and are refused — not ignored — when that CLI cannot take them, so a pane never quietly starts on a different model than asked for. Most CLIs accept a model; fewer accept a separate effort, the rest encoding it in the model id (`gpt-5.3-codex-high`). Model ids are not validated (they change every release); effort is checked against that CLI's vocabulary |
+| `cli_close_agent` | `target`, `pane_id?` | Close a pane — the other half of `cli_open_agent`. **This ends the other agent's work**: the pane and its PTY go away, whatever turn was running dies with them, and anything queued for it is never delivered. It cannot be undone — a closed pane's session is gone, not parked, so check `cli_get_status` first; `cli_interrupt` is the softer rung and `cli_send` softer still. Returns `{ok, target, name, closed, advisories?}`, where `advisories` names what closing cost and nobody else would have reported — the pane was mid-turn, messages were queued for it, it had children that are now orphaned — gathered before the kill because none of it is knowable afterwards. Panes on this machine only: a `<device>/<workspace>/<pane>` address fails with `close-local-only`, which is a limit of this tool rather than a wrong address |
 
 `cli_send` returns once the message is *accepted* for delivery, not once the
 other agent read it. `cli_check_message` closes that loop: `status` is
@@ -261,6 +262,7 @@ recorded as diagnostics, readable via `ui_diagnostics`.
 | `cli_get_status` | `target`, `pane_id?` | `{busy, agent_key, last_activity?, ui?}` — `ui` mirrors `ui.pane.getStatus` when the owning window answers  **Remote panes**: answers from the roster with `remote: true` and `source: "roster_status"` — one badge word, no `last_activity`, no `ui` block, debounced 0.5s and swept 30s, so near-live rather than live. |
 | `cli_wait_idle` | `target`, `timeout_s=60` (capped at 120), `pane_id?` | Blocks until the pane is idle or the timeout passes; returns `{idle, source, waited_s, last_activity?, ui_status?}`, plus `reason` on timeout  **Remote panes**: polls the roster badge. `source` is `roster_status` or `roster_offline`, **never** `turn_complete` — the strongest remote observation is "the badge stopped saying busy". A parked pane times out with `reason: "awaiting_unclassified"`, because the roster carries one word and cannot separate a permission prompt (waiting on a human) from a question (effectively idle). `offline` is a real third answer, returned at once rather than waited out. |
 | `cli_interrupt` | `target`, `pane_id` | Send the CLI's interrupt key to a pane on this machine — `ESC` for codex, `^C` for the rest. **This does not stop a turn**: depending on the CLI it may abort the turn, merely clear the input box, or on a second press quit the CLI entirely. It is a keystroke, not a command. Verify with `cli_get_status`/`cli_wait_idle`; if the work can be allowed to finish, `cli_send` a message instead. Returns `{ok, target, name, sent, status_before, advisories?}` — `sent: false` means nothing was issued (no session, or the window was reconnecting). Local panes only |
+| `cli_message_log` | `limit=50` (capped at 200) | **CLI panes only.** Your own message history — what you sent and what reached you, newest last. `cli_inbox_summary` reports only sends that are stuck and `cli_pending_incoming` only what has not been delivered yet; neither answers "what did we already say to each other" once a message has landed. This is the persisted log, so it survives a backend restart, and reading here never takes a message off anyone's queue. Only your own rows come back, matched on your current messaging name — a message queued for a name you have since been renamed away from stops matching as yours. Returns `{ok, count, messages, scanned, truncated}`; each message is `{uid, created_at, status, sender, recipient, direction, excerpt}` plus, when set, `kind` / `reason` / `delivered_at` / `correlation_id` / `reply_to` / `remote` / `remote_workspace`. `excerpt` is 200 characters with the whitespace flattened — `cli_read_incoming` is what returns a message in full. `truncated` means older rows were cut off, either by `limit` or by the window of recent rows scanned |
 
 `cli_read_log`'s `since` reads incrementally: pass back the `next_cursor` from
 your previous call to get only what the pane has said since then, instead of
@@ -313,6 +315,7 @@ the wait could reach one.
 | `ui_list_actions` | `workspace_path` | List every command id registered in the Navide window that owns `workspace_path` |
 | `ui_invoke` | `workspace_path`, `action`, `args?` | Invoke one registered action, passing `args` through verbatim |
 | `ui_snapshot` | `workspace_path` | Structured snapshot of that window's UI state |
+| `ui_diagnostics` | `workspace_path`, `since_seq=0`, `pane_id`, `limit=50` | Renderer-side diagnostics that window recorded about its own UI actions — e.g. `injectText` resending content because its echo check timed out, or giving up entirely — which a `ui_invoke` caller cannot see from `ok: true` alone, and which used to appear only in that window's devtools console. Use it when a tool reported success but the in-window behaviour looked wrong (duplicated input, a stuck send). `since_seq` returns only entries after that sequence number, so passing a previous call's `nextSeq` polls incrementally |
 
 All three wait up to 15 seconds for the owning window to reply, and error if
 no window currently has `workspace_path` open (compared by exact string —
@@ -349,10 +352,12 @@ documented argument shapes.
 |---|---|---|
 | `ui.settings.open` | `{tab?}` (one of `general`, `mcp`, `analyzer`, `updates`, `appearance`, `accounts`, `storage`, `keybindings`) | Open Settings, optionally to a specific tab |
 | `ui.settings.close` | — | Close Settings |
+| `ui.settings.yolo` | `{yolo?}` | Read the global CLI permission-bypass switch, or set it when `yolo` is passed. Returns `{yolo, agents}`, each agent being `{agent, mode, skipFlag}`. Not workspace-scoped: any window answers it, and `skipFlag` — not `yolo` — is the per-vendor answer |
 | `ui.pane.create` | `{agent, name?, task?}` | Spawn a pane for `agent` in the window's open workspace; `task`, if given, is sent as the kickoff prompt and skips role injection |
 | `ui.pane.close` | `{paneId}` | Kill a pane |
 | `ui.pane.focus` | `{paneId}` | Reveal and focus a pane (switches tab if needed) |
 | `ui.pane.getStatus` | `{paneId}` | Returns `{status, buffer, logPath?}` for that pane |
+| `ui.pane.interrupt` | `{paneId}` | Press that pane's interrupt key. Returns `{sent, status, advisories?}` — the status is read *before* the press, because the press changes the very thing being reported |
 | `ui.tab.switch` | `{tabId}` | Switch the active stage/run-group tab |
 | `ui.preview.show` | `{kind, …}` | Show a file, diff or inline snippet in the right rail's preview panel |
 | `ui.window.openPlans` | — | Open the Plan window |
@@ -360,6 +365,16 @@ documented argument shapes.
 | `ui.window.openPipeline` | `{pipelineId?}` | Open the Pipeline Manager window |
 | `ui.workspace.open` | `{path}` | Open `path` as a workspace (routed to any live window — see above) |
 | `ui.layout.setMode` | `{mode}` | Change the pane layout mode |
+| `ui.pipeline.start` | `{task?, pipelineId?}` | Start a pipeline run in the window's open workspace. Errors when no workspace is open, when a run is already running (abort it first), when no `pipelineId` was given and the workspace has none selected, or when the run never reached `running`. Returns `{pipelineId, stages, workspacePath, state}` |
+| `ui.pipeline.abort` | — | Abort the run in progress; errors when nothing is running rather than answering ok for a no-op. Returns `{workspacePath, state}` |
+| `ui.pipeline.next` | — | Advance the running pipeline to its next stage now. Errors when no run is `running`, when the current stage is the last one (there is nothing to advance to, so the window refuses rather than completing the run behind a caller who asked to step forward), or when the stage index did not actually move. Returns `{workspacePath, state, stageIndex, stages}` |
+| `ui.pipeline.resume` | — | Resume the workspace's recorded run at the stage after the last finished one. Errors when no workspace is open, when a run is already running (abort it first), when there is no recorded run or it has no stage left, or when the resume never reached `running`. Returns `{workspacePath, state, stageIndex, stages}` |
+| `ui.pipeline.reset` | — | Close every pane in the window's workspace — manual panes included — and clear the run back to idle. Errors when no workspace is open, or when the state did not land on `idle`. Returns `{workspacePath, state, stageIndex}` |
+| `ui.pipeline.restart` | — | Start the recorded run over from stage one with the same task, taken from the recorded run first and the live task field second. Errors when no workspace is open, when a run is already running, when there is no previous task to start over from, or when the restart never reached `running`. Returns `{pipelineId, stages, workspacePath, state, stageIndex}` |
+| `ui.messaging.readIncoming` | `{paneId, uids?, limit?, includeDelivered?, reserve?, maxChars?}` | Read that pane's mail out of the window's own queue, matched on the pane's current messaging name. Returns `{messages, reserved, paused}`; each message is `{uid, sender, status, kind, content, createdAt, correlationId, inReplyTo, hold}`. Only rows still `queued` are reserved, delivered history is readable but cannot be consumed, and `reserve: false` reads without reserving. `paused` is why a read can come back empty while mail is in fact waiting |
+| `ui.messaging.settleRead` | `{paneId, uids, ok?}` | Settle a reservation taken by `ui.messaging.readIncoming`: any `ok` other than `false` consumes those uids, `ok: false` says the text never arrived and releases them back into the queue. Returns `{settled}` |
+| `ui.groupPeers` | `{paneId}` | The panes a `group` broadcast from `paneId` would reach — group membership is UI state the backend never learns, so it has to be asked of the window owning the sender. Returns `{group_id, peers: [{pane_id, name}]}`; unassigned panes share the synthetic `manual` group and so broadcast to each other |
+| `ui.diagnostics.read` | `{sinceSeq?, paneId?, limit?}` | The action behind `ui_diagnostics`. Returns `{entries, nextSeq}` |
 
 This list is maintained in code, not here — verify against the
 `registerCommand('ui.*', …)` block in
@@ -375,7 +390,7 @@ openWorkspaces}`.
 
 Every workspace keeps one feed of what was changed or shown in it, persisted
 in that workspace's `.agent-team/navide.db` so it survives a Navide restart.
-These three tools are an agent's end of that feed: report your own writes,
+These tools are an agent's end of that feed: report your own writes,
 read back what other writers reported, and push something in front of the
 user.
 
@@ -384,6 +399,7 @@ user.
 | `preview_record` | `rel_path`, `change="modified"`, `note`, `kind="file"`, `content`, `title`, `workspace_path` | Report a file you just created, modified or deleted; returns `{uid, created_at, rel_path, change, merged}`, plus `warning?` |
 | `preview_list` | `limit=50` (capped at 300), `since=0`, `change`, `agent`, `workspace_path` | Read the feed back, newest first; returns `{workspace_path, entries, truncated}`, plus `warning?` |
 | `preview_show` | `rel_path`, `kind="file"`, `content`, `title`, `workspace_path` | Push a file, diff or inline content into the right rail's preview panel; returns the window's own `{ok, result, error}` plus `recorded`, and on `ok` also `uid`, `merged` and `warning?` |
+| `preview_clear` | `workspace_path`, `before=0` | Empty the feed — the fourth verb, after record, list and show. **This deletes rows the user can see in the Preview panel and cannot be undone**, and it takes everything on the feed, not only your own records: the file watcher's and the user's are on it too. `before` is a `created_at` from `preview_list` (epoch milliseconds) — rows stamped before it go and everything at or after it stays, which is what makes a clear safe while other sessions are still recording; left at 0 the whole feed goes. Returns `{workspace_path, removed, before}`, plus `warning?` |
 
 `workspace_path` behaves exactly as it does for the `plan_*` tools: a pane
 caller may omit it and gets that pane's own workspace; a host or external
@@ -432,6 +448,189 @@ is caught by the filesystem watcher and recorded with `source: "watcher"` and
 no attribution. `preview_list` is therefore a fuller picture than the sum of
 the `preview_record` calls made against a workspace, and an entry without a
 `pane_id` means nobody claimed the change — not that nothing made it.
+
+### Quota and token spend
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `cli_usage` | `agent=""` | How much CLI quota each vendor has left, as Navide tracks it. Worth reading before handing work to another pane: `cli_send` queues a task for a CLI whose plan is exhausted just as happily as for one that can run it, and the message lands only for the other agent to fail on it. `agent` narrows the answer to one vendor key (`claude`, `codex`, …) — the same key `cli_whoami` reports as `agent_key`. Returns `{ok, providers, accounts, enabled, intervalSec}`, plus `agent` when a filter was applied: `providers` maps a vendor key to its current snapshot, `accounts` maps a vendor key to its per-account snapshots for the vendors where Navide tracks more than one login. The numbers are the vendors' own, reported unchanged and never normalised into one shape, so read the fields a vendor gives you. `enabled: false` means quota polling is switched off, so what is here is only what was read last. A vendor with no entry at all is one Navide cannot read a quota for — which is not the same claim as a vendor with quota left |
+| `cli_token_stats` | `workspace_path` | What this workspace has spent, as Navide counts it — the numbers behind the Token panel. Returns `{workspace_path, current_run, cumulative, runs, runs_truncated, live_sessions, live_session_count, all_time, by_vendor, by_day}`. `cumulative` is this project's totals with `by_vendor` and `by_stage` breakdowns; `all_time` and `by_vendor` are every project's; `current_run` is `null` when no pipeline run is open; `runs` is the last few archived runs, aggregate only, with `runs_truncated` when older ones were cut; `live_sessions` is the busiest CLI sessions running now (`{input, output, calls}` each), `live_session_count` how many there are, and `by_day` the last week of global usage. A count is what a vendor's own session log holds, so a vendor whose log Navide cannot read contributes nothing rather than a zero. `cli_usage` is the other half — that is quota left with the vendor, this is spend recorded here |
+
+### Workspaces, skills and instruction files
+
+Three read-only inventories. Each answers a question the tools above assume you
+already know the answer to: which paths are workspaces, what a CLI is given
+before you write it an instruction, and what the project already says.
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `workspace_list` | — | The projects Navide knows about, most recently opened first — the list `plan_create`, `preview_record` and `cli_open_agent` want a path out of. Returns `{workspaces, live_pane_workspaces}`. Each workspace carries the store's own record (`path`, `name`, `last_opened_at`, `pinned`, `exists`) plus `has_live_panes`: true when a CLI pane is running in it right now. Prefer one of those — a workspace with `has_live_panes: false` has no Navide window watching it, so a plan or a preview written there is not shown to the user at all, and `exists: false` is the harder failure, the folder being gone from disk. `live_pane_workspaces` is that live set on its own, resolved; a pane can be running in a project the user never opened from the welcome screen, which is a perfectly legal `workspace_path` the recent list does not mention |
+| `skills_list` | — | The skills Navide manages, and which of them reach you. Returns `{skills, native, root, agents}`. Each shared skill is `{name, description, enabled, targets, managed, valid, native_conflict}` — `targets` null means every vendor receives it, a list means only those, and `enabled: false` means nobody does. Each native entry is `{name, description, source, owner_agent, real_path, valid}`, a skill some CLI already owns. `agents` is every vendor with its delivery support (`wired`, `planned`, `unsupported`), so "not delivered" and "cannot be delivered" stay apart. `delivered_to_me` — `{agent_key, skills, native_paths}` — is the half about you, and is absent for a caller with no pane identity. Names and descriptions only: a skill's instructions are read from its own folder when you use it. Read-only — delivering a skill is the user's decision, made in Settings |
+| `memory_list` | `workspace_path`, `path=""` | The instruction files the CLIs here load — `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` and the rest, in this project and in the user's home. With no `path` this lists metadata only: `{workspace_path, files, agents}`, each file being `scope` (`user` or `project`), `path`, `relative`, `readers` (the vendor keys that load it), `canonical`, `exists`, `size`, `modified`, `error`. A file that does not exist yet is still listed, because it names where a convention would go; `agents` is every vendor with how Navide finds its files (`mapped` or `configured`). With a `path` it returns that one file — `{workspace_path, file, path, text, exists, modified}` — and the path must be one this listing reported, anything else being refused, so this is not a way to read arbitrary files. Read-only: editing an instruction file is the user's decision, made in Settings. Without a workspace, only user-scope files are listed |
+
+### Pipelines
+
+A pipeline is a saved multi-stage run: an ordered set of stages, each with
+slots naming which CLI plays which role. The first two tools read; the other
+six drive a run.
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `pipeline_list` | — | The pipeline templates this machine has, and the roles their stages are cast from. Returns `{pipelines, active_pipeline_id, roles}`: each pipeline is `{id, name, builtin, stage_count, stages}`, each stage `{id, title, short_title, description, sentinel, allow_questions, recommended_roles, slots}`, and each slot `{agent_key, role_key, label, is_commander}`. `roles` gives each role's `{key, label, one_line, is_default}` — enough to know what a `role_key` means. Two things are deliberately absent, because both are whole prompts: a slot's kickoff body, and a role's system prompt. `active_pipeline_id` is the template the Pipelines window currently has selected. Templates only — where a run has actually got to is `pipeline_status` |
+| `pipeline_status` | `workspace_path` | Where a workspace's pipeline run has got to, if it has one — read it to find out whether you are part of something larger, since a pane opened as a pipeline slot is told its task and not that it is stage three of five. Returns `{workspace_path, active, …}`; `active` is true only while a run is in progress, and a workspace that has never run one answers `{workspace_path, active: false}` and nothing else, which is the empty state rather than an error. When a project exists it also carries `state` (`idle`, `running`, `completed`, `aborted`), `task_description`, `pipeline_id`, `current_stage_index`, `total_stages`, `run_count`, `log_file_name`, `updated_at`, plus `stages` (`{stage_id, title, agent, role, pane_id, status, started_at, ended_at}` each) and `panes`, the pipeline slots as `{pane_id, agent, role, stage_id, stage_index, slot_label, spawn_status, kickoff_status}`. Panes the user or an agent opened by hand are not pipeline slots and are left out; `cli_list_targets` is where every pane is listed |
+| `pipeline_start` | `task`, `pipeline_id`, `workspace_path` | Start a run: open the first stage's panes and hand them the task. **This opens CLI panes and spends their quota** — every slot of a stage is a fresh CLI process with its own context and its own bill, and later stages open as the run advances, so read `pipeline_list` for what a template is made of and `pipeline_status` for whether a run is already going first. `pipeline_id` is a template id as `pipeline_list` reports it; left empty the workspace's currently selected pipeline runs, and a workspace with none selected refuses rather than picking one. `task` is what the run is for — the text each stage's kickoff message is built from. Returns the window's own `{ok, result, error}`, `result` carrying `{pipelineId, stages, workspacePath, state}`. `ok: false` means nothing started: a run already going (abort it first), no pipeline to run, or a first stage whose panes all failed to spawn |
+| `pipeline_abort` | `workspace_path` | Stop the run in progress. Abort is a pause, not a kill: the orchestration stops — no further stage is activated, no more routing between the panes — and the panes already open stay open with their work intact, so the user can resume the run from the banner the window then shows. Nothing is deleted. Returns the window's own `{ok, result, error}`, `result` carrying `{workspacePath, state}`; `ok: false` usually means no run was in progress, which `pipeline_status` will confirm |
+| `pipeline_next` | `workspace_path` | Advance the run to its next stage now, instead of waiting for the window to decide the current one is finished. **This opens CLI panes and spends their quota** — the next stage's slots are spawned immediately, and work still in flight in the current stage is not waited for, so its output simply does not reach the stage that follows. Read `pipeline_status`'s `current_stage_index` and `total_stages` first: on the last stage there is nothing to advance to and the call is refused rather than completing the run. Returns the window's own `{ok, result, error}`, `result` carrying `{workspacePath, state, stageIndex, stages}`; `ok: false` means nothing advanced, the usual reason being that no run is in progress |
+| `pipeline_resume` | `workspace_path` | Carry a run that was aborted or interrupted on from where it stopped — the other half of `pipeline_abort`. The recorded run is picked back up at the stage after the last finished one and that stage's panes are spawned, so **this opens CLI panes and spends their quota**, but progress already made is kept: this is the non-destructive way back into a run, unlike `pipeline_reset` and `pipeline_restart`. The run resumes against the pipeline it was started with, switching the active pipeline back if it has since changed; if that template is gone, or its stages no longer reach the recorded index, the resume stops and says so rather than running an unrelated stage against this run's task. Returns `{ok, result, error}`, `result` carrying `{workspacePath, state, stageIndex, stages}`; `ok: false` means nothing resumed — no recorded run, or one already running |
+| `pipeline_reset` | `workspace_path` | **Destructive, and wider than it sounds.** Unlike `pipeline_abort`, which pauses the orchestration and leaves the panes alive to be resumed, reset tears down *every* pane in the workspace — the ones the pipeline opened **and** the ones the user or another agent opened by hand — and returns the workspace to idle with the run's task, stage index and log cleared. There is no resume afterwards and no undo. Read `pipeline_status` for how far the run got and `cli_list_targets` for which panes are about to close; if the intent is only to stop the run, `pipeline_abort` keeps the work. Returns `{ok, result, error}`, `result` carrying `{workspacePath, state, stageIndex}` |
+| `pipeline_restart` | `workspace_path` | **Destructive, and it opens CLI panes and spends their quota.** Throws the current run away — every pane the pipeline opened is closed and the recorded progress is discarded — and runs the same pipeline again from stage one with the same task, so the stages that had already finished are paid for and run a second time. There is no undo. The task comes from the recorded run first and the live task field second, so a workspace with neither is refused; a run already `running` is refused too (abort it first). Read `pipeline_status` first: a run three stages in is three stages of work to redo, and if the goal is only to get past a stuck stage, `pipeline_next` costs nothing already spent. Returns `{ok, result, error}`, `result` carrying `{pipelineId, stages, workspacePath, state, stageIndex}` |
+
+Starting and aborting are renderer jobs — the backend's own `pipeline.start`
+handler only writes the run record, while the panes for each stage are spawned
+by the window — so these two tools go through the UI action bus
+(`ui.pipeline.start` / `ui.pipeline.abort`) and inherit its rules: they need a
+live window that has `workspace_path` open, and wait up to 15 seconds for it.
+`workspace_path` behaves as it does everywhere else: a pane caller may omit it
+and gets its own workspace.
+
+`pipeline_next`, `pipeline_resume`, `pipeline_reset` and `pipeline_restart` are
+the same shape for the same reason — the renderer owns the orchestration, so
+they go through `ui.pipeline.next` / `.resume` / `.reset` / `.restart` and
+inherit the same window requirement and 15-second wait. They are the buttons
+the user has in the window, addressed by MCP.
+
+#### Editing the templates
+
+Three more tools write the definitions a run is built from. Unlike the six
+above they do **not** go through a window: they write the backend's own store
+and broadcast the same `pipelines.changed` / `stages.changed` /
+`roles.changed` events the WS handlers do, so an open Pipelines window updates
+itself. `pipeline_list` is the read side of all three.
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `pipeline_define` | `op`, `pipeline_id`, `name`, `workspace_path` | Create, rename, delete or re-seed a pipeline **template** — the named, ordered set of stages `pipeline_start` runs. Nothing here starts, stops or advances a run. Returns `{ok, op, pipelines, active_pipeline_id}`, plus `pipeline` for the ops that produce one (`create`, `rename`, `reset_builtin`). A created pipeline is empty and is not made active, so it cannot be run until `stage_define` gives it stages. The last remaining pipeline cannot be deleted at all, and deleting one does not stop or rewind a run already started — the run keeps its recorded `pipeline_id` and its open panes; what breaks is resuming it later, since the template it names is gone |
+| `stage_define` | `op`, `pipeline_id`, `stage_id`, `stage`, `ids`, `workspace_path` | Add, edit, remove, reorder or re-seed the **stages** inside one pipeline. A stage is one step and holds the slots that become panes: each slot names a CLI (`agent_key`) and a role (`role_key`) and carries the kickoff text that pane is started with. `pipeline_id` left empty means the *active* pipeline, which is what the Pipelines window has selected and not necessarily the one you were reading — name it. Returns `{ok, op, stages, pipeline_id, pipelines, active_pipeline_id}`, plus `stage` for `upsert`. A pipeline's last remaining stage cannot be deleted |
+| `role_define` | `op`, `key`, `new_key`, `label`, `one_line`, `system_prompt` | Create, edit, rename, delete or re-seed the **roles** slots are cast from. A role is a named system prompt: a slot names one by `role_key`, and the pane that slot opens is started with that prompt. Roles are global to the machine — not per pipeline, not per workspace — so an edit here reaches every pipeline that names the role, and there is no `workspace_path` to narrow it. Returns `{ok, op, roles}`, plus `role` for `upsert` and `rename` and `repointed_pipeline_ids` for `rename`. The last remaining role cannot be deleted. A pane already started keeps the prompt it was given; a change reaches the next pane opened for that slot, not the ones on screen |
+
+**Which arguments each `op` needs.** This is where these three are easiest to
+misuse: `op` decides which other arguments are required, and a missing one
+comes back as `ok: false` with `error_code: "missing_argument"` and nothing
+written. An unknown `op` is `"bad_op"`.
+
+| Tool | `op` | Needs | Notes |
+|---|---|---|---|
+| `pipeline_define` | `create` | `name` | Adds an empty pipeline and returns it with its generated id. Not made active |
+| `pipeline_define` | `rename` | `pipeline_id`, `name` | Renames in place; ids and stages are untouched |
+| `pipeline_define` | `delete` | `pipeline_id` | Destructive. Refused during a run — see below |
+| `pipeline_define` | `set_active` | `pipeline_id` | Picks the template the Pipelines window shows and that `pipeline_start` uses when called with no `pipeline_id` of its own |
+| `pipeline_define` | `reset_builtin` | `pipeline_id` | Only `default` and `maintenance` have seed data. Replaces every stage of the pipeline with its seed set |
+| `stage_define` | `upsert` | `stage` | A full stage object, matched on `stage["id"]`: an existing id is merged over (fields you omit keep their old values), a new one is appended at the end. The store requires `id` (letters, digits, hyphen, underscore, dot) and a non-empty `slots`. Shape: `{id, title, short_title, question, description, sentinel, recommended_roles, allow_questions, doc_query, slots}`, each slot `{agent_key, role_key, label, kickoff_body, is_commander}`. Read one out of `pipeline_list` and edit that shape rather than composing one blind — but `pipeline_list` deliberately omits `kickoff_body`, so an upsert built from it alone blanks the kickoffs of the slots it rewrites |
+| `stage_define` | `delete` | `stage_id` | Refused for a pipeline's last remaining stage |
+| `stage_define` | `reorder` | `ids` | The stage ids in the order you want. Ids not listed keep their relative order at the end; unknown ids and duplicates are ignored. The order **is** the run order |
+| `stage_define` | `reset` | — | Destructive: puts back the built-in stages for `default` and `maintenance`, and **nothing at all** for a pipeline you created — a custom pipeline reset this way is left empty and unrunnable. No undo, so read it out of `pipeline_list` first if you might want it back |
+| `role_define` | `upsert` | `key`, `label`, `system_prompt` | `key` is 1–32 characters of lowercase letters, digits, underscore or dash. **Replaces the whole role**: a `label` or `system_prompt` you do not pass is written blank, and blank is refused — which is the only thing stopping a partial upsert from erasing a prompt. `one_line` is the short description shown next to the label |
+| `role_define` | `rename` | `key`, `new_key` | Renames and repoints every stage slot that named the old key in one step, so there is no intermediate state where slots point at nothing. `label` / `one_line` / `system_prompt` are optional here: what you omit is carried over from the existing role. Refused when `key` does not exist (`not_found`) or `new_key` is already taken (`role_key_exists`), because merging two roles would silently drop one side's prompt |
+| `role_define` | `delete` | `key` | Refused while any stage slot still names the role — see below |
+| `role_define` | `reset` | — | Destructive: throws away every role, custom ones included, and puts back the built-in set. Slots left naming a role the seed set does not have are blanked rather than left dangling, so pipelines survive but those slots lose their role and must be re-cast. No undo |
+
+**Editing while a run is going.** `pipeline_define`'s `delete` and
+`set_active` are refused outright while that workspace has a run in the
+`running` state, and `reset_builtin` is refused while the run in progress is
+using that pipeline. Every one of `stage_define`'s four ops is refused the same
+way — a stage list edited mid-run would change the flow underneath the run. The
+refusal is `ok: false` with `error_code: "pipeline_running"`, and nothing was
+written. A run compares against the pipeline it recorded at start, so naming
+that pipeline explicitly does not get past the guard; runs in other workspaces,
+or on other pipelines, are unaffected. `workspace_path` names the project whose
+run is checked — it defaults to the calling pane's workspace, and a caller with
+no pane that passes nothing gets no guard at all. An edit landing between two
+runs changes what the NEXT one does, silently, which is the case to warn the
+user about.
+
+`role_define` has **no** run guard: editing a role is allowed while a pipeline
+runs. Its `delete` is guarded on something else instead — it is refused while
+any stage slot still names the role, and the refusal (`error_code:
+"role_in_use"`) lists those slots in `usages` so you can repoint them with
+`stage_define` op `upsert`, or rename instead. A slot pointing at a deleted
+role fails role injection and leaves that stage's pane sitting at an empty
+prompt with nothing on screen to say why, which is what the refusal is for.
+
+The other `error_code` values these three return are `not_found` and `invalid`
+(the store refused the value). Every failure writes nothing.
+
+### CLI permissions
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `cli_permission_settings` | `yolo`, `workspace_path` | Read, or change, the global switch that lets CLIs skip their permission prompts. Called with no argument it only reads; passing `yolo` sets it. Returns the window's own `{ok, result, error}`, `result` being `{yolo, agents}` with one `agents` entry per CLI vendor — `{agent, mode, skipFlag}`. `ok: false` with `error_code: "ui_no_window"` means no Navide window was open to ask |
+
+"Yolo" is Navide's name for the permission-bypass flag it passes a CLI at spawn
+(claude's `--dangerously-skip-permissions`, and each vendor's equivalent).
+Turning it on means the CLIs Navide starts stop asking before they edit files,
+run shell commands or make network calls in the user's workspace, and act on
+their own judgement instead. That is the user's call to make — do not switch it
+on to get your own work past a prompt.
+
+**It is not pipeline scope, and not workspace scope.** It is ONE setting for
+the whole app, stored with the user's settings and read by every path that
+starts a CLI: new panes opened by hand, pipeline slots, the in-window CLI dock,
+resumes and restores alike. A change applies to CLIs started **after** it —
+processes already running keep the flags they were launched with, so turning it
+off does not reach back into a pane that is already going. `workspace_path` is
+**addressing only**: it picks which window is asked, not what the change
+applies to. Every window gives the same answer and a write through any of them
+reaches all of them, so it defaults to the calling pane's window and a caller
+with no pane that names nothing simply gets whichever window is open. There is
+no per-project version of this setting to reach by passing a different path.
+
+**Reading `yolo` on its own will mislead you.** Each vendor has its own `mode`,
+and it BEATS the global switch: `inherit` follows it, `force-on` and
+`force-off` ignore it. So `yolo: true` does not mean every CLI bypasses, and
+`yolo: false` does not mean none does. The per-CLI answer is
+`agents[].skipFlag` — the flag that vendor would actually be launched with
+right now, empty string meaning none. Vendors with no bypass flag at all
+(grok, opencode, pi) are always empty there whatever the switch says.
+
+## Resources
+
+Three read-only URIs. A client lists and reads resources on the user's behalf —
+attaching one to a conversation is something the person does, not something an
+agent is talked into — so each is strictly read-only, and each is a view of
+data a tool already serves rather than a second implementation of it.
+
+| URI | Name | What it returns |
+|---|---|---|
+| `navide://workspace/plans` | `workspace_plans` | `{workspace_path, plans}` — the index of the plan documents in your workspace's `.agent-team/plans/`, the same listing `plan_list` returns, as JSON |
+| `navide://workspace/plan/{rel_path}` | `workspace_plan` | One plan document: `{rel_path, meta, html}`, read through `plan_read`'s own path guard |
+| `navide://panes` | `panes` | The CLI panes you can send instructions to, the same roster `cli_list_targets` returns, as JSON |
+
+A resource read is authenticated exactly as a tool call is: the same caller is
+resolved, and an unwired caller is refused the same way. The two workspace
+resources take the caller's own workspace and have no parameter for naming
+another project, so they are for a pane caller — an external client, which has
+no pane identity, has no workspace for them to resolve.
+
+**`rel_path` is a single URI segment.** The SDK matches a template parameter
+with `[^/]+`, so it cannot carry a raw `/`: the bare filename works as it is,
+and the full `.agent-team/plans/<file>` form has to be percent-encoded
+(`.agent-team%2Fplans%2F<file>`). The value is decoded before it is resolved,
+which is what keeps the guard load-bearing rather than decorative — `%2E%2E%2F`
+is `../` by the time it would reach the filesystem, and `plan_read` refuses
+anything that leaves the plans subtree.
+
+## Prompts
+
+Three templates for the **user**, not documentation for the model: a client
+surfaces these to the person, usually as a slash command, and what comes back
+is inserted into their message. Each one therefore renders a filled-in
+instruction that stands on its own when sent.
+
+| Prompt | Arguments | What it asks for |
+|---|---|---|
+| `delegate_to_pane` | `target`, `task` | Send `task` to the CLI pane addressed by `target` with `cli_send`, then stop and wait for its reply rather than doing the work yourself — running `cli_list_targets` first if that address is not in the roster, and asking which pane was meant rather than guessing at a similar name. The message it sends asks `target` to report back with `cli_send` when it is done |
+| `start_pipeline` | `task` | Start this workspace's pipeline run for `task` — but read `pipeline_status` for whether a run is already in progress and `pipeline_list` for which stages it opens first, say what it is about to open (this spends CLI quota), and wait for the user to say go. Then report whether the run actually started, and what the window gave as the reason if it did not |
+| `review_plan` | `rel_path` | Read the plan document at `rel_path` with `plan_read` and go through it as a reviewer, checking its claims against the code. Record each finding on the document itself with `plan_add_note`, one note per finding, rather than only reporting back, then say whether the plan is ready to approve as it stands |
 
 ## A pane's id outlives its pane
 

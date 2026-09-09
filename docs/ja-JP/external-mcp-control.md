@@ -56,10 +56,10 @@ Credential（Navide が claude/codex の Pane を Spawn するときに発行）
 配信先となる自分の Group もなければ、それを尋ねる Window もないからです。Pane を
 個別に、あるいは `pane_id` で指定してください。
 
-実装: [`plan_mcp.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py)
-（Tool）、[`plan_mcp_auth.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp_auth.py)
+実装: [`mcp_server/server.py`](../../backend/agent_team_backend/mcp_server/server.py)
+（Tool）、[`mcp_server/auth.py`](../../backend/agent_team_backend/mcp_server/auth.py)
 （Credential Store、App Data Directory 配下の `plan_mcp_auth.json`）、
-[`plan_mcp_wiring.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp_wiring.py)
+[`mcp_server/wiring.py`](../../backend/agent_team_backend/mcp_server/wiring.py)
 （Pane/Host の配線 — 外部 Client には不要）。
 
 ## Tool カタログ
@@ -107,6 +107,7 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 | `cli_read_incoming` | `uid=""`, `limit=5`（上限 20）, `include_delivered=false`, `peek=false` | **CLI Pane 専用。** 自分宛メッセージの全文（`cli_pending_incoming` は空白を潰した 200 文字のみ）: `{count, messages: [{uid, sender, status, kind?, content, age_seconds, consumed, correlation_id?, in_reply_to?, hold?, held_for_s?, stale?}], note?}`。**既定では読むと消費されます**——読んだメッセージはその後 Pane に入力されません。`peek: true` は消費せずに読みます。消費は予約してから解放する二段階で、解放が失われた場合メッセージは Queue に戻り二度届くことがあります。`consumed` はメッセージごとに返され、消費されなかった理由は `note` に入ります |
 | `cli_send_and_wait` | `to`, `text`, `timeout_s=60`（上限 120）, `pane_id?` | `cli_send` に加えてその Turn の完了まで待機。`cli_wait_idle` の結果に `{ok, target, msg_key}` を付けて返す  **リモート Pane**: 送信と配信 gate はローカルと同じ（`rejected` は `failed` と区別されたまま）。待機の半分は名簿バッジを使い、弱点は `cli_wait_idle` と同じです。 |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path`（Pane 以外の呼び出し元では必須）, `model`, `effort` | Task 付きで新しい CLI Pane を Spawn。`{ok, name, address, pane_id}` を返し、Spawn が Advisory の閾値を越えた場合は `advisories` も返す。`model` と `effort` は任意で、その CLI が受け付けない場合は無視せず「拒否」するため、Pane が別のモデルで静かに起動することはない。多くの CLI は model を受け付けるが、独立した effort を受け付けるものは少なく、残りは effort を model id に埋め込む（`gpt-5.3-codex-high`）。model id は検証しない（リリースごとに変わるため）が、effort はその CLI の語彙と照合する |
+| `cli_close_agent` | `target`, `pane_id?` | Pane を閉じる — `cli_open_agent` のもう半分です。**これは相手の作業を終わらせます**: Pane と PTY が消え、走っていた Turn もろとも死に、その Pane 宛に Queue されていたものは配信されません。取り消しは効きません — 閉じた Pane の Session は待避ではなく消滅です。先に `cli_get_status` を見て、作業中の Pane は閉じないでください。`cli_interrupt` はより穏当な段（割り込みキーを押すだけで Pane は開いたまま）、`cli_send` はさらに穏当（Turn の完了を待つ）です。`{ok, target, name, closed, advisories?}` を返します。`advisories` は閉じたことの代償のうち他の誰も報告しないもの — Pane が Turn の途中だった、メッセージが Queue に残っていた、子 Pane が孤児になった — で、Kill の後では知りようがないため事前に集めます。このマシン上の Pane のみ: `<device>/<workspace>/<pane>` 形式のアドレスは `close-local-only` で失敗します。これはアドレスの誤りではなく、この Tool の限界です |
 
 `cli_send` は、メッセージが配信のために*受理された*時点で返り、相手の Agent が
 読んだ時点ではありません。`cli_check_message` がそのループを閉じます。`status`
@@ -259,6 +260,7 @@ CLI Pane を保持でき、Spawn の連鎖は任意の深さで実行できま�
 | `cli_get_status` | `target`, `pane_id?` | `{busy, agent_key, last_activity?, ui?}` — `ui` は所有ウィンドウが応答したときに `ui.pane.getStatus` を反映  **リモート Pane**: 名簿から回答し、`remote: true` と `source: "roster_status"` を付けます。バッジの語が 1 つだけで、`last_activity` も `ui` ブロックもなく、0.5 秒の debounce と 30 秒の sweep があるため、ライブではなく準ライブです。 |
 | `cli_wait_idle` | `target`, `timeout_s=60`（上限 120）, `pane_id?` | Pane が Idle になるか Timeout するまで Block。`{idle, source, waited_s, last_activity?, ui_status?}` を返し、Timeout 時は `reason` も返す  **リモート Pane**: 名簿のバッジを polling します。`source` は `roster_status` か `roster_offline` で、**`turn_complete` にはなりません**——リモートで得られる最も強い観測は「バッジが busy でなくなった」だけです。停止中の Pane は `reason: "awaiting_unclassified"` で timeout します。名簿は語を 1 つしか運ばず、権限プロンプト待ち（人間待ち）と質問中（実質 idle）を区別できないためです。`offline` は第三の答えとして、待たずに即座に返ります。 |
 | `cli_interrupt` | `target`, `pane_id` | このマシン上の Pane に、その CLI の割り込みキーを送ります（codex は `ESC`、それ以外は `^C`）。**これは Turn を止めることを意味しません**: CLI によって、Turn を中断することも、単に入力欄をクリアするだけのことも、二度押しで CLI 自体が終了することもあります。コマンドではなくキーストロークです。結果は `cli_get_status`／`cli_wait_idle` で確認してください。その作業を終わらせてよいなら `cli_send` でメッセージを送る方が適切です。`{ok, target, name, sent, status_before, advisories?}` を返します。`sent: false` は何も送られなかったことを意味します（session が無い、またはウィンドウが再接続中）。ローカル Pane のみ |
+| `cli_message_log` | `limit=50`（上限 200） | **CLI Pane 専用。** 自分自身のメッセージ履歴 — 何を送り、何が自分に届いたか（新しいものが最後）。`cli_inbox_summary` は滞留した送信だけ、`cli_pending_incoming` はまだ配信されていない受信だけを報告します。届いてしまえばメッセージはどちらからも消え、Compaction の後は自分の Context からも消えるため、「我々が既に何を言い合ったか」に答えられるのはここだけです。永続化された Log なので Backend の再起動をまたいで残り、ここで読んでも誰かの Queue からメッセージが取り除かれることはありません。返るのは自分の行だけで、判定は**現在の**メッセージング名との照合です — 後で改名した名前宛に Queue されたメッセージは、もう自分のものとして一致しません。`{ok, count, messages, scanned, truncated}` を返します。各メッセージは `{uid, created_at, status, sender, recipient, direction, excerpt}` に加えて、値があれば `kind` / `reason` / `delivered_at` / `correlation_id` / `reply_to` / `remote` / `remote_workspace`。`excerpt` は空白を潰した 200 文字で、全文を返すのは `cli_read_incoming` です。`truncated` は自分の古いメッセージが切り落とされたこと（`limit` によるか、走査した直近行の窓によるか）を意味し、`scanned` はその窓が何行あったかです |
 
 `cli_read_log` の `since` は増分読み取りです。前回の呼び出しの `next_cursor` を
 渡し戻すと、同じ末尾を読み直す代わりに、それ以降に Pane が述べた分だけを取得
@@ -307,6 +309,7 @@ Turn に対する判定ではない唯一のものです。待機が判定に至
 | `ui_list_actions` | `workspace_path` | `workspace_path` を所有する Navide ウィンドウに登録されたすべての Command ID を一覧 |
 | `ui_invoke` | `workspace_path`, `action`, `args?` | 登録済みの Action を一つ呼び出し、`args` をそのまま渡す |
 | `ui_snapshot` | `workspace_path` | そのウィンドウの UI State の構造化 Snapshot |
+| `ui_diagnostics` | `workspace_path`, `since_seq=0`, `pane_id`, `limit=50` | そのウィンドウが自分の UI アクションについて記録した Renderer 側の診断 — 例えば `injectText` が Echo チェックの Timeout で内容を再送した、あるいは完全に諦めた、といったもの。`ui_invoke` の呼び出し元が `ok: true` だけからは知りようがなく、以前はそのウィンドウの DevTools コンソールにしか出ませんでした。Tool が成功を報告したのにウィンドウ内の挙動がおかしい（入力の重複、送信の停止）場合の診断に使います。`since_seq` はその Sequence 番号より後のエントリだけを返すので、前回の `nextSeq` を渡せば増分 polling ができます |
 
 三つとも所有ウィンドウの応答を最大 15 秒待ち、現在 `workspace_path` を開いている
 ウィンドウがなければ Error になります（完全一致の文字列比較 — ウィンドウを開いた
@@ -342,10 +345,12 @@ Host Wiring — だけです。Navide の CLI Pane から、その Pane 自身�
 |---|---|---|
 | `ui.settings.open` | `{tab?}`（`general`、`mcp`、`analyzer`、`updates`、`appearance`、`accounts`、`storage`、`keybindings` のいずれか） | Settings を開く。任意で特定のタブへ |
 | `ui.settings.close` | — | Settings を閉じる |
+| `ui.settings.yolo` | `{yolo?}` | CLI の権限バイパスのグローバルスイッチを読む。`yolo` を渡した場合は設定する。`{yolo, agents}` を返し、各 agent は `{agent, mode, skipFlag}`。Workspace スコープではありません: どのウィンドウでも答えられ、ベンダーごとの答えは `yolo` ではなく `skipFlag` です |
 | `ui.pane.create` | `{agent, name?, task?}` | ウィンドウが開いている Workspace に `agent` の Pane を Spawn。`task` を指定した場合は Kickoff Prompt として送られ、Role 注入はスキップされる |
 | `ui.pane.close` | `{paneId}` | Pane を Kill |
 | `ui.pane.focus` | `{paneId}` | Pane を表示して Focus（必要ならタブを切り替え） |
 | `ui.pane.getStatus` | `{paneId}` | その Pane の `{status, buffer, logPath?}` を返す |
+| `ui.pane.interrupt` | `{paneId}` | その Pane の割り込みキーを押す。`{sent, status, advisories?}` を返す — `status` は押す**前**に読まれます。押すこと自体が、報告しようとしているその状態を変えてしまうためです |
 | `ui.tab.switch` | `{tabId}` | Active な Stage/Run-group タブを切り替え |
 | `ui.preview.show` | `{kind, …}` | 右レールのプレビューパネルにファイル・diff・インラインスニペットを表示 |
 | `ui.window.openPlans` | — | Plan ウィンドウを開く |
@@ -353,6 +358,16 @@ Host Wiring — だけです。Navide の CLI Pane から、その Pane 自身�
 | `ui.window.openPipeline` | `{pipelineId?}` | Pipeline Manager ウィンドウを開く |
 | `ui.workspace.open` | `{path}` | `path` を Workspace として開く（生きている任意のウィンドウにルーティング — 上記参照） |
 | `ui.layout.setMode` | `{mode}` | Pane の Layout Mode を変更 |
+| `ui.pipeline.start` | `{task?, pipelineId?}` | ウィンドウが開いている Workspace で Pipeline の実行を開始する。Workspace が開かれていない、既に実行中（先に Abort が必要）、`pipelineId` が未指定でその Workspace に選択中の Pipeline も無い、あるいは実行が `running` に到達しなかった場合はエラー。`{pipelineId, stages, workspacePath, state}` を返す |
+| `ui.pipeline.abort` | — | 進行中の実行を中止する。何も走っていなければ、no-op に ok を返すのではなくエラーにする。`{workspacePath, state}` を返す |
+| `ui.pipeline.next` | — | 実行中の Pipeline を今すぐ次の Stage へ進める。`running` の実行が無い場合、現在が最後の Stage の場合（進む先が無いので、「前へ」と言った呼び出し元の背後で実行を完了扱いにするのではなく拒否します）、あるいは Stage インデックスが実際には動かなかった場合はエラー。`{workspacePath, state, stageIndex, stages}` を返す |
+| `ui.pipeline.resume` | — | この Workspace に記録された実行を、最後に完了した Stage の次から再開する。Workspace が開かれていない、既に実行中（先に Abort が必要）、記録された実行が無いか残る Stage が無い、あるいは再開が `running` に到達しなかった場合はエラー。`{workspacePath, state, stageIndex, stages}` を返す |
+| `ui.pipeline.reset` | — | そのウィンドウの Workspace にある Pane を（手で開いたものも含めて）すべて閉じ、実行を idle まで消す。Workspace が開かれていない、あるいは状態が `idle` に落ち着かなかった場合はエラー。`{workspacePath, state, stageIndex}` を返す |
+| `ui.pipeline.restart` | — | 記録された実行を、同じ Task で Stage 1 からやり直す。Task はまず記録された実行から、次に画面上の Task フィールドから取ります。Workspace が開かれていない、既に実行中、やり直す元の Task が無い、あるいは再開始が `running` に到達しなかった場合はエラー。`{pipelineId, stages, workspacePath, state, stageIndex}` を返す |
+| `ui.messaging.readIncoming` | `{paneId, uids?, limit?, includeDelivered?, reserve?, maxChars?}` | ウィンドウ自身の Queue からその Pane 宛のメールを読む（Pane の現在のメッセージング名で照合）。`{messages, reserved, paused}` を返し、各メッセージは `{uid, sender, status, kind, content, createdAt, correlationId, inReplyTo, hold}`。予約されるのはまだ `queued` の行だけで、配信済みの履歴は読めても消費はできず（既に消費されているため）、`reserve: false` は予約せずに読む。`paused` は、実際には待っているメールがあるのに読み取りが空で返る理由で、「今は受け取れない」と「メールが無い」を分けます |
+| `ui.messaging.settleRead` | `{paneId, uids, ok?}` | `ui.messaging.readIncoming` が取った予約を確定する: `ok` が `false` 以外ならそれらの uid を消費し、`ok: false` は「テキストは届かなかった」という申告として予約を解放し、メッセージを Queue の元の位置に戻す。`{settled}` を返す |
+| `ui.groupPeers` | `{paneId}` | `paneId` からの `group` Broadcast が届く Pane 群 — グループの所属は Backend が決して知り得ない UI State なので、送信 Pane を所有するウィンドウに尋ねるしかありません。`{group_id, peers: [{pane_id, name}]}` を返す。未割り当ての Pane は合成された `manual` グループを共有するため、誰にも届かないのではなく互いに Broadcast します |
+| `ui.diagnostics.read` | `{sinceSeq?, paneId?, limit?}` | `ui_diagnostics` の背後にある Action。`{entries, nextSeq}` を返す |
 
 この一覧はここではなくコード側で保守されています。正確な引数形状に依存する前に、
 [`App.vue`](../../src/renderer/src/App.vue) の
@@ -366,7 +381,7 @@ workspacePath, status?}], activeTab, settingsOpen, openWorkspaces}` です。
 
 各 Workspace は「そこで何が変更され、何が表示されたか」の Feed を一本持ちます。
 その Workspace の `.agent-team/navide.db` に永続化されるため、Navide を再起動しても
-残ります。この三つの Tool は Agent 側の入り口です。自分の書き込みを報告し、他の
+残ります。これらの Tool は Agent 側の入り口です。自分の書き込みを報告し、他の
 書き込み者が報告した内容を読み戻し、何かをユーザーの目の前に押し出します。
 
 | Tool | パラメータ | 動作 |
@@ -374,6 +389,7 @@ workspacePath, status?}], activeTab, settingsOpen, openWorkspaces}` です。
 | `preview_record` | `rel_path`, `change="modified"`, `note`, `kind="file"`, `content`, `title`, `workspace_path` | 今作成・変更・削除したファイルを報告。`{uid, created_at, rel_path, change, merged}` に加えて `warning?` を返す |
 | `preview_list` | `limit=50`（上限 300）, `since=0`, `change`, `agent`, `workspace_path` | Feed を新しい順に読み戻す。`{workspace_path, entries, truncated}` に加えて `warning?` を返す |
 | `preview_show` | `rel_path`, `kind="file"`, `content`, `title`, `workspace_path` | ファイル・diff・インラインコンテンツを右レールのプレビューパネルへ Push。ウィンドウ自身の `{ok, result, error}` に `recorded` を加えて返し、`ok` のときはさらに `uid`, `merged`, `warning?` も返す |
+| `preview_clear` | `workspace_path`, `before=0` | この Feed を空にする — record、list、show に続く四つ目の動詞です。**これはユーザーがプレビューパネルで見ている行を削除し、取り消せません。** 消えるのは自分の記録だけではありません: File Watcher のものもユーザーのものも同じ Feed 上にあります。`before` は `preview_list` が返す `created_at`（epoch ミリ秒）で、それより前の行が消え、同時刻以降はすべて残ります — 他の Session が記録し続けている最中でも安全に消せるのはこのためです。0 のままだと Feed 全体が消えます。`{workspace_path, removed, before}` に加えて `warning?` を返します |
 
 `workspace_path` の振る舞いは `plan_*` 群と完全に同じです。Pane 呼び出し元は省略でき、
 その Pane 自身の Workspace になります。Host や外部 Client は Pane の身元を持たないため
@@ -422,6 +438,183 @@ Watcher がフォールバックとして拾い、`source: "watcher"`、帰属�
 したがって `preview_list` が見せる像は、その Workspace に対する `preview_record`
 呼び出しの総和よりも広く、`pane_id` を持たない記録は「誰もその変更を名乗り出て
 いない」ことを意味します — 何もそれを起こしていない、という意味ではありません。
+
+### クォータとトークン消費
+
+| Tool | パラメータ | 動作 |
+|---|---|---|
+| `cli_usage` | `agent=""` | 各ベンダーの CLI クォータがどれだけ残っているか、Navide が追跡している通りに返します。他の Pane に仕事を渡す前に確認する価値があります: `cli_send` は、プランを使い切った CLI に対しても実行できる CLI に対するのと同じように Task を Queue し、メッセージは届いた上で相手がそこで失敗するだけになります。`cli_open_agent` でどのベンダーを開くか決める前にも同じことが言えます。`agent` は答えを一つのベンダーキー（`claude`、`codex`…）に絞ります — `cli_whoami` が `agent_key` として報告するのと同じキーです。空なら追跡中の全ベンダーが返ります。`{ok, providers, accounts, enabled, intervalSec}` を返し、フィルタしたときは `agent` も付きます: `providers` はベンダーキーから現在の Snapshot への対応、`accounts` は Navide が複数ログインを追跡しているベンダーについて、アカウント Slot をキーとした各アカウントの Snapshot です。数値はベンダー自身のものをそのまま返しており、Navide は再計算も注釈もしないため、すべてが同じ形をしていると期待せず、そのベンダーが実際に返すフィールドを読んでください。`enabled: false` はクォータの polling が切られていることを意味し、ここにあるのは最後に読めた値だけです。エントリがまったく無いベンダーは Navide がクォータを読めないベンダーであり、「クォータが残っている」という主張とは別物です |
+| `cli_token_stats` | `workspace_path` | この Workspace がどれだけトークンを使ったか、Navide の数え方で返します — Token パネルの背後にある数値です。`{workspace_path, current_run, cumulative, runs, runs_truncated, live_sessions, live_session_count, all_time, by_vendor, by_day}` を返します。`cumulative` はこのプロジェクトの合計で `by_vendor` と `by_stage` の内訳付き、`all_time` と `by_vendor` は全プロジェクト分、`current_run` は Pipeline の実行が開いていなければ `null`、`runs` は直近の Archive 済み実行（集計のみ、古いものが切られたときは `runs_truncated` が true）、`live_sessions` は今動いている中で最も忙しい CLI Session（それぞれ `{input, output, calls}`）、`live_session_count` はその総数、`by_day` は直近一週間のグローバル使用量です。カウントの出どころは各ベンダー自身の Session Log なので、Navide が Log を読めないベンダーはゼロではなく「寄与なし」になります。`cli_usage` がもう半分です — あちらはベンダー側に残るクォータ、こちらはここに記録された消費です |
+
+### Workspace・Skills・指示ファイル
+
+三つの読み取り専用インベントリです。それぞれ、上の Tool 群が「もう知っている」と
+前提している問いに答えます: どのパスが Workspace なのか、CLI に指示を書く前にその
+CLI が既に何を渡されているのか、そしてこのプロジェクトが既に何を述べているのか。
+
+| Tool | パラメータ | 動作 |
+|---|---|---|
+| `workspace_list` | — | Navide が知っているプロジェクトを、最近開いた順に返します — `plan_create`、`preview_record`、`cli_open_agent` はどれもプロジェクトルートの絶対パスを求めますが、そのパスがどれなのかを教えるものが今までありませんでした。これがそのリストです。`{workspaces, live_pane_workspaces}` を返します。各 Workspace は Store 自身のレコード（`path`、`name`、`last_opened_at`、`pinned`、`exists`）に加えて `has_live_panes`（今まさに CLI Pane が動いていれば true）を持ちます。それを優先してください — `has_live_panes` が false の Workspace はどの Navide ウィンドウにも見られていないため、そこに書いた Plan や Preview はユーザーにまったく表示されません。`exists` が false はもっと厳しい失敗で、フォルダがディスクから消えています。`live_pane_workspaces` はその Live 集合そのもの（解決済み）です。Pane は、ユーザーが Welcome 画面から一度も開いていないプロジェクトで動いていることがあり、それは最近リストが言及しないだけの、まったく正当な `workspace_path` です |
+| `skills_list` | — | Navide が管理する Skills と、そのうちどれが自分に届くか。Skill は CLI が必要に応じて読み込む指示のフォルダです。Navide は任意のベンダーに配信できる共有ライブラリを持ち、同時に各 CLI が自分のディレクトリに持つものも反映します。自分で指示を書く前に何が使えるかを知るため、あるいはユーザーの求めていることをどの Skill がカバーするかを伝えるために読んでください。`{skills, native, root, agents}` を返します。各共有 Skill は `{name, description, enabled, targets, managed, valid, native_conflict}` — `targets` が null なら全ベンダーが受け取り、リストならそのベンダーのみ、`enabled` が false なら誰も受け取りません。各 native エントリは `{name, description, source, owner_agent, real_path, valid}` で、あるCLI が既に持っている Skill です。`agents` は各ベンダーとその配信サポート（`wired` / `planned` / `unsupported`）で、「配信されていない」と「配信できない」を分けたままにします。`delivered_to_me` は自分についての半分 — `{agent_key, skills, native_paths}`、自分の CLI が実際に与えられている名前です。Pane 識別を持たない呼び出し元は誰の配信対象でもないため、この欄はありません。あるのは名前と説明だけで、Skill の指示内容は使うときにそのフォルダから読むものです。読み取り専用 — Skill を配信するかどうかは Settings でのユーザーの判断です |
+| `memory_list` | `workspace_path`, `path=""` | ここの CLI が読み込む指示ファイル — `CLAUDE.md`、`AGENTS.md`、`GEMINI.md` など、このプロジェクトのものとユーザーのホームのもの。`path` なしで呼ぶとメタデータのみを一覧します: `{workspace_path, files, agents}` で、各ファイルは `scope`（`user` または `project`）、`path`、`relative`、`readers`（それを読み込むベンダーキー）、`canonical`、`exists`、`size`、`modified`、`error`。まだ存在しないファイルも一覧されます。それは「ある慣習がどこに置かれるか」を示すからです。`agents` は各ベンダーと Navide がそのファイルを見つける方法（`mapped` または `configured`）です。`path` を付けるとその一つを返します: `{workspace_path, file, path, text, exists, modified}` — パスはこの一覧が報告したものでなければならず、それ以外は拒否されるため、任意のファイルを読む手段ではありません。読み取り専用: 指示ファイルの編集は Settings でのユーザーの判断で、ここに対応する Tool はありません。Workspace が無い場合は user スコープのファイルのみが一覧されます |
+
+### Pipeline
+
+Pipeline は保存された多段階の実行です: 順序付けられた Stage の集合で、各 Stage は
+どの CLI がどの Role を演じるかを指名する Slot を持ちます。最初の二つは読み取り、
+残りの六つは実行そのものを動かします。
+
+| Tool | パラメータ | 動作 |
+|---|---|---|
+| `pipeline_list` | — | このマシンにある Pipeline テンプレートと、その Stage がキャスティングされる Role。`{pipelines, active_pipeline_id, roles}` を返します: 各 Pipeline は `{id, name, builtin, stage_count, stages}`、各 Stage は `{id, title, short_title, description, sentinel, allow_questions, recommended_roles, slots}`、各 Slot は `{agent_key, role_key, label, is_commander}`。`roles` は各 Role の `{key, label, one_line, is_default}` を返し、`role_key` が何を意味するかを知るには十分です。二つのものは意図的に含まれていません。どちらもプロンプト一式だからです: Slot の Kickoff 本文と、Role の System Prompt です。`active_pipeline_id` は Pipelines ウィンドウが現在選択しているテンプレートです。ここにあるのはテンプレートだけで、ある実行がどこまで進んだかは `pipeline_status` です |
+| `pipeline_status` | `workspace_path` | ある Workspace の Pipeline 実行がどこまで進んだか（実行があれば）。自分がより大きな流れの一部なのかを知るために使います: Pipeline Slot として開かれた Pane は Task を告げられるだけで、自分が五段階中の三段階目だとは告げられず、次の Stage は自分の完了が記録されるまで始まりません。`{workspace_path, active, …}` を返します。`active` は実行が進行中のときだけ true で、一度も Pipeline を走らせたことのない Workspace は `{workspace_path, active: false}` だけを返します — それはエラーではなく空状態です。プロジェクトの記録がある場合はさらに `state`（`idle` / `running` / `completed` / `aborted`）、`task_description`（何のために始めた実行か）、`pipeline_id`（`pipeline_list` のどのテンプレートか）、`current_stage_index` と `total_stages`、`run_count`、`log_file_name`、`updated_at`、加えて `stages`（それぞれ `{stage_id, title, agent, role, pane_id, status, started_at, ended_at}`）と `panes`（Pipeline の Slot: `{pane_id, agent, role, stage_id, stage_index, slot_label, spawn_status, kickoff_status}`）を持ちます。ユーザーや Agent が手で開いた Pane は Pipeline Slot ではないので含まれません。すべての Pane が並ぶのは `cli_list_targets` です |
+| `pipeline_start` | `task`, `pipeline_id`, `workspace_path` | 実行を開始する: 最初の Stage の Pane を開き、Task を渡します。**これは CLI Pane を開き、そのクォータを消費します** — Stage の各 Slot は独自の Context と独自の請求を持つ新しい CLI プロセスであり、後続の Stage は実行の進行に伴って開かれます。まず `pipeline_list` でこのマシンにあるテンプレートと各テンプレートの構成を、`pipeline_status` で既に実行が進行中でないかを読んでください — 推測で踏み出す一歩ではありません。`pipeline_id` は実行するテンプレートで、`pipeline_list` が報告する id です。空なら Workspace が現在選択している Pipeline が走り、何も選択していない Workspace は勝手に選ばず拒否します。`task` はその実行が何のためのものかで、各 Stage の Kickoff メッセージはこのテキストから組み立てられます。ウィンドウ自身の応答 `{ok, result, error}` を返し、`result` は `{pipelineId, stages, workspacePath, state}` を運びます。`ok` が false なら何も始まっていません: 既に実行中（先に Abort）、走らせる Pipeline が無い、あるいは最初の Stage の Pane がすべて Spawn に失敗した、のいずれかです。ウィンドウは呼び出しが返ったという事実ではなく実行自身の状態を報告するため、ここでの ok は「開始したが何も起きなかった」という答えにはなりません |
+| `pipeline_abort` | `workspace_path` | ある Workspace で進行中の実行を止めます。Abort は Kill ではなく一時停止です: オーケストレーションが止まり（次の Stage は起動されず、Pane 間のルーティングも行われません）、既に開いている Pane は作業ごとそのまま残るため、ユーザーはウィンドウが表示するバナーから実行を再開できます。何も削除されません。ウィンドウ自身の応答 `{ok, result, error}` を返し、`result` は `{workspacePath, state}` を運びます。`ok` が false は何も中止されなかったことを意味し、通常の理由は実行が進行中でなかったことです — `pipeline_status` がそれを教えます |
+| `pipeline_next` | `workspace_path` | ウィンドウが現在の Stage を完了と判断するのを待たず、今すぐ次の Stage へ進めます。**これは CLI Pane を開き、そのクォータを消費します** — 次の Stage の Slot が即座に Spawn され、現在の Stage でまだ動いている作業は待たれないため、その出力は後続の Stage には届きません。まず `pipeline_status` の `current_stage_index` と `total_stages` を読んでください: 最後の Stage では進む先が無く、実行を完了扱いにするのではなく呼び出しが拒否されます。ウィンドウ自身の応答 `{ok, result, error}` を返し、`result` は `{workspacePath, state, stageIndex, stages}` を運びます。`ok` が false なら何も進んでおらず、通常の理由は実行が進行中でないことです |
+| `pipeline_resume` | `workspace_path` | Abort または中断された実行を、止まったところから続けます — `pipeline_abort` のもう半分です。記録された実行は最後に完了した Stage の次から拾い直され、その Stage の Pane が Spawn されるので**これは CLI Pane を開き、そのクォータを消費します**が、既に得た進捗は保たれます: `pipeline_reset` や `pipeline_restart` と違い、実行に戻る非破壊的な方法です。実行は開始時の Pipeline に対して再開され、Active な Pipeline が変わっていれば戻されます。そのテンプレートが失われていたり、Stage 数が記録されたインデックスに届かなくなっていた場合は、この実行の Task を無関係な Stage で走らせるのではなく、再開を止めて理由を告げます。`{ok, result, error}` を返し、`result` は `{workspacePath, state, stageIndex, stages}` を運びます。`ok` が false なら何も再開していません — 記録された実行が無いか、既に実行中です |
+| `pipeline_reset` | `workspace_path` | **破壊的であり、名前から想像するより広い範囲に及びます。** オーケストレーションを一時停止して Pane を再開可能なまま残す `pipeline_abort` と違い、Reset は Workspace の**すべての** Pane を壊します — Pipeline が開いたもの**も**、ユーザーや他の Agent が手で開いたものもです — そして実行の Task・Stage インデックス・ログを消して Workspace を idle に戻します。その後の再開は無く、Undo もありません。実行がどこまで進んだかは `pipeline_status`、これから閉じられる Pane は `cli_list_targets` で読んでください。実行を止めたいだけなら `pipeline_abort` が作業を残します。`{ok, result, error}` を返し、`result` は `{workspacePath, state, stageIndex}` を運びます |
+| `pipeline_restart` | `workspace_path` | **破壊的であり、CLI Pane を開いてそのクォータを消費します。** 現在の実行を捨て — Pipeline が開いた Pane はすべて閉じられ、記録された進捗は破棄されます — 同じ Pipeline を同じ Task で Stage 1 から走らせ直します。つまり既に終わっていた Stage は、支払い済みのうえでもう一度走ります。Undo はありません。Task はまず記録された実行から、次に画面上の Task フィールドから取るため、どちらも無い Workspace は拒否されます。既に `running` の実行がある場合も拒否されます（先に Abort）。まず `pipeline_status` を読んでください: 三つ目の Stage まで進んだ実行は三 Stage 分のやり直しであり、詰まった Stage を越えたいだけなら `pipeline_next` は支払い済みの分を無駄にしません。`{ok, result, error}` を返し、`result` は `{pipelineId, stages, workspacePath, state, stageIndex}` を運びます |
+
+開始と中止は Renderer の仕事です — Backend 自身の `pipeline.start` handler は実行
+レコードを書くだけで、各 Stage の Pane はウィンドウが Spawn します — そのためこの
+二つの Tool は UI Action Bus（`ui.pipeline.start` / `ui.pipeline.abort`）を通り、その
+規則を引き継ぎます: `workspace_path` を開いている生きたウィンドウが必要で、最大 15
+秒待ちます。`workspace_path` の振る舞いは他と同じで、Pane 呼び出し元は省略でき、
+省略すれば自分の Workspace になります。
+
+`pipeline_next`、`pipeline_resume`、`pipeline_reset`、`pipeline_restart` も同じ理由で
+同じ形です — オーケストレーションは Renderer のものなので、それぞれ
+`ui.pipeline.next` / `.resume` / `.reset` / `.restart` を通り、同じウィンドウ要件と
+15 秒の待機を引き継ぎます。ユーザーがウィンドウで押すボタンそのものを、MCP から
+アドレス指定しているだけです。
+
+#### テンプレートを編集する
+
+さらに三つの Tool が、実行の元になる定義そのものを書きます。上の六つと違い、これらは
+ウィンドウを**通りません**: Backend 自身の Store に書き、WS handler と同じ
+`pipelines.changed` / `stages.changed` / `roles.changed` イベントを Broadcast するので、
+開いている Pipelines ウィンドウは自分で更新されます。三つとも読み取り側は
+`pipeline_list` です。
+
+| Tool | パラメータ | 動作 |
+|---|---|---|
+| `pipeline_define` | `op`, `pipeline_id`, `name`, `workspace_path` | Pipeline **テンプレート** — `pipeline_start` が走らせる、名前の付いた順序付き Stage 集合 — を作成・改名・削除・再シードします。ここでの操作は実行を開始も停止も前進もさせません。`{ok, op, pipelines, active_pipeline_id}` を返し、Pipeline を生む op（`create` / `rename` / `reset_builtin`）はさらに `pipeline` を返します。作成された Pipeline は空で、Active にもされないため、`stage_define` で Stage を与えるまで走らせられません。最後に残った一つの Pipeline は削除できません。また Pipeline を削除しても、既に始まっている実行は止まりも巻き戻りもしません — その実行は記録した `pipeline_id` と開いた Pane を保ちます。壊れるのは後からの再開で、指名しているテンプレートがもう無いからです |
+| `stage_define` | `op`, `pipeline_id`, `stage_id`, `stage`, `ids`, `workspace_path` | 一つの Pipeline の中の **Stage** を追加・編集・削除・並べ替え・再シードします。Stage は一つの工程で、Pane になる Slot を持ちます: 各 Slot は CLI（`agent_key`）と Role（`role_key`）を指名し、その Pane が起動時に受け取る Kickoff テキストを持ちます。`pipeline_id` を空にすると **Active な** Pipeline を意味します。それは Pipelines ウィンドウが選択しているもので、あなたが読んでいたものとは限りません — 明示してください。`{ok, op, stages, pipeline_id, pipelines, active_pipeline_id}` を返し、`upsert` はさらに `stage` を返します。Pipeline の最後に残った Stage は削除できません |
+| `role_define` | `op`, `key`, `new_key`, `label`, `one_line`, `system_prompt` | Slot がキャスティングする **Role** を作成・編集・改名・削除・再シードします。Role は名前の付いた System Prompt で、Slot は `role_key` で一つを指名し、その Slot が開く Pane はその Prompt で起動します。Role はマシン全体でグローバルです — Pipeline ごとでも Workspace ごとでもありません — なのでここでの編集はその Role を指名するすべての Pipeline に届き、範囲を絞る `workspace_path` もありません。`{ok, op, roles}` を返し、`upsert` と `rename` はさらに `role`、`rename` は `repointed_pipeline_ids` も返します。最後に残った Role は削除できません。既に起動している Pane は与えられた Prompt を保ちます。変更が届くのはその Slot で次に開かれる Pane であって、画面にあるものではありません |
+
+**各 `op` が必要とする引数。** この三つを最も誤用しやすいのがここです: `op` が他の
+どの引数を必須にするかを決め、足りなければ `ok: false` と
+`error_code: "missing_argument"` が返り、何も書かれません。知らない `op` は
+`"bad_op"` です。
+
+| Tool | `op` | 必要な引数 | 備考 |
+|---|---|---|---|
+| `pipeline_define` | `create` | `name` | 空の Pipeline を追加し、生成された id と共に返します。Active にはなりません |
+| `pipeline_define` | `rename` | `pipeline_id`, `name` | その場で改名。id も Stage も変わりません |
+| `pipeline_define` | `delete` | `pipeline_id` | 破壊的。実行中は拒否されます — 下記参照 |
+| `pipeline_define` | `set_active` | `pipeline_id` | Pipelines ウィンドウが表示するテンプレート、および `pipeline_start` が `pipeline_id` 無しで呼ばれたときに使うテンプレートを選びます |
+| `pipeline_define` | `reset_builtin` | `pipeline_id` | シードデータを持つのは `default` と `maintenance` だけです。その Pipeline のすべての Stage をシード集合で置き換えます |
+| `stage_define` | `upsert` | `stage` | 完全な Stage オブジェクト。`stage["id"]` で照合され、既存の id は上からマージされ（渡さなかったフィールドは元の値のまま）、新しい id は末尾に追加されます。Store は `id`（英数字・ハイフン・アンダースコア・ドットのみ）と空でない `slots` を要求します。形は `{id, title, short_title, question, description, sentinel, recommended_roles, allow_questions, doc_query, slots}`、各 Slot は `{agent_key, role_key, label, kickoff_body, is_commander}`。手探りで組み立てるのではなく `pipeline_list` から一つ読み出して編集してください — ただし `pipeline_list` は意図的に `kickoff_body` を省くので、それだけを元に組んだ upsert は、書き換えた Slot の Kickoff を空にしてしまいます |
+| `stage_define` | `delete` | `stage_id` | Pipeline の最後に残った Stage に対しては拒否されます |
+| `stage_define` | `reorder` | `ids` | 望む順序での Stage id。挙げなかった id は互いの相対順序のまま末尾に残り、未知の id と重複は無視されます。この順序が**そのまま**実行順です |
+| `stage_define` | `reset` | — | 破壊的: `default` と `maintenance` には組み込みの Stage が戻りますが、自分で作った Pipeline には**何も戻りません** — こうして Reset された独自 Pipeline は空になり、走らせられなくなります。Undo は無いので、また欲しくなる可能性があるなら先に `pipeline_list` で読み出しておいてください |
+| `role_define` | `upsert` | `key`, `label`, `system_prompt` | `key` は小文字英字・数字・アンダースコア・ダッシュの 1〜32 文字。**Role 全体を置き換えます**: 渡さなかった `label` や `system_prompt` は空で書かれ、そして空は拒否されます — これが「中途半端な upsert が Prompt を消す」ことを止めている唯一のものです。`one_line` は Label の隣に表示される短い説明です |
+| `role_define` | `rename` | `key`, `new_key` | 改名と、旧 key を指名していたすべての Stage Slot の張り替えを一手で行うので、Slot がどこも指していない中間状態は生じません。ここでの `label` / `one_line` / `system_prompt` は任意で、省いた分は既存の Role から引き継がれます。`key` が存在しない（`not_found`）、または `new_key` が既に使われている（`role_key_exists`）場合は拒否されます。二つの Role を統合すれば、片方の Prompt を黙って落とすことになるからです |
+| `role_define` | `delete` | `key` | いずれかの Stage Slot がまだその Role を指名している間は拒否されます — 下記参照 |
+| `role_define` | `reset` | — | 破壊的: 独自のものも含めてすべての Role を捨て、組み込みの集合を戻します。シード集合に無い Role を指名していた Slot は、宙ぶらりんのままではなく空にされるので、Pipeline は生き残りますが、それらの Slot は Role を失い、キャスティングし直しになります。Undo はありません |
+
+**実行中に編集した場合。** その Workspace の実行が `running` 状態の間、
+`pipeline_define` の `delete` と `set_active` は即座に拒否され、`reset_builtin` は
+進行中の実行がその Pipeline を使っている間は拒否されます。`stage_define` の四つの op は
+**すべて**同じように拒否されます — 実行中に編集された Stage リストは、その実行の足元で
+流れを変えてしまうからです。拒否は `ok: false` と
+`error_code: "pipeline_running"` で、何も書かれていません。実行は開始時に記録した
+Pipeline と照合するため、その Pipeline を明示してもガードは抜けられません。他の
+Workspace の実行や、別の Pipeline を走らせている実行には影響しません。
+`workspace_path` はどのプロジェクトの実行を照合するかを指すもので、既定は呼び出し元
+Pane の Workspace です。Pane を持たない呼び出し元が何も渡さなければ、ガードは一切
+掛かりません。二つの実行の間に着地した編集は**次の**実行の動きを黙って変えるので、
+それこそがユーザーに知らせるべきケースです。
+
+`role_define` には実行ガードが**ありません**: Pipeline が走っていても Role の編集は
+許されます。その `delete` は別のものでガードされます — いずれかの Stage Slot がまだ
+その Role を指名している間は拒否され、その拒否（`error_code: "role_in_use"`）は該当の
+Slot を `usages` に並べるので、`stage_define` の `upsert` で張り替えるか、改名に切り替え
+られます。削除された Role を指す Slot は Role 注入に失敗し、その Stage の Pane は理由を
+示すものが画面に何も無いまま空の Prompt の前で止まります。この拒否はそのためにあります。
+
+この三つが返す他の `error_code` は `not_found` と `invalid`（Store が値を拒否した）です。
+どの失敗でも何も書き込まれません。
+
+### CLI の権限
+
+| Tool | パラメータ | 動作 |
+|---|---|---|
+| `cli_permission_settings` | `yolo`, `workspace_path` | CLI に権限プロンプトをスキップさせるグローバルスイッチを読む、または変更します。引数なしで呼べば読むだけ、`yolo` を渡せば設定します。ウィンドウ自身の応答 `{ok, result, error}` を返し、`result` は `{yolo, agents}`。`agents` は CLI ベンダーごとに一件で `{agent, mode, skipFlag}` です。`ok` が false で `error_code: "ui_no_window"` は、尋ねられる Navide ウィンドウが開いていなかったことを意味します |
+
+「Yolo」は、Navide が Spawn 時に CLI へ渡す権限バイパスのフラグ（claude の
+`--dangerously-skip-permissions` と、各ベンダーの相当品）に対する Navide 側の呼び名です。
+これを有効にするとは、Navide が起動する CLI が、ユーザーの Workspace でファイルを編集し、
+シェルコマンドを実行し、ネットワークにアクセスする前に尋ねるのをやめ、自分の判断で動く
+ということです。それはユーザーが下す判断です — 自分の作業をプロンプトの先へ通すために
+有効化してはいけません。
+
+**これは Pipeline スコープでも Workspace スコープでもありません。** アプリ全体で
+**一つ**の設定で、ユーザー設定と共に保存され、CLI を起動するすべての経路が読みます:
+手で開く Pane、Pipeline の Slot、ウィンドウ内蔵の CLI パネル、再開も復元も同じです。
+変更が効くのは**それ以降**に起動される CLI で、既に走っているプロセスは起動時のフラグを
+保ち続けるため、オフにしても既に動いている Pane には遡って届きません。ここでの
+`workspace_path` は**アドレス指定専用**です: どのウィンドウに尋ねるかを選ぶだけで、
+変更の適用範囲を決めるものではありません。どのウィンドウも同じ答えを返し、どれを通して
+書いてもすべてに届くため、既定は呼び出し元 Pane のウィンドウで、Pane を持たず何も
+指名しない呼び出し元は開いているどれか一つのウィンドウに当たります。別のパスを渡せば
+届くようなプロジェクト単位版は存在しません。
+
+**`yolo` だけを読むと誤解します。** 各ベンダーは自分の `mode` を持ち、それはグローバル
+スイッチを**上書きします**: `inherit` は従い、`force-on` と `force-off` は無視します。
+つまり `yolo: true` はすべての CLI がバイパスすることを意味せず、`yolo: false` もどれも
+しないことを意味しません。CLI ごとの答えは `agents[].skipFlag` — そのベンダーが今まさに
+起動されるときに実際に付くフラグで、空文字列は「付かない」です。バイパスフラグを一切
+持たないベンダー（grok、opencode、pi）は、スイッチがどうであれ常に空です。
+
+## Resources
+
+三つの読み取り専用 URI です。Resource は Client がユーザーの代わりに一覧・読み取り
+するもので、会話に添付するのは人の行為であり Agent が説得されて行うものではありま
+せん。そのためこの三つは厳密に読み取り専用であり、いずれも既存の Tool が提供する
+データの別の見え方であって、二つ目の実装ではありません。
+
+| URI | 名前 | 何を返すか |
+|---|---|---|
+| `navide://workspace/plans` | `workspace_plans` | `{workspace_path, plans}` — 自分の Workspace の `.agent-team/plans/` にある Plan Document の索引。`plan_list` が返すのと同じ一覧を JSON で |
+| `navide://workspace/plan/{rel_path}` | `workspace_plan` | 一つの Plan Document: `{rel_path, meta, html}`。`plan_read` 自身のパスガードを通して読まれます |
+| `navide://panes` | `panes` | 指示を送れる CLI Pane。`cli_list_targets` が返すのと同じ名簿を JSON で |
+
+Resource の読み取りは Tool 呼び出しとまったく同じように認証されます: 同じ呼び出し元
+が解決され、配線されていない呼び出し元は同じように拒否されます。二つの Workspace
+Resource は呼び出し元自身の Workspace を取り、別のプロジェクトを指名するパラメータ
+はありません。したがってこれらは Pane 呼び出し元のためのもので、Pane 識別を持たない
+外部 Client には解決すべき Workspace がありません。
+
+**`rel_path` は URI の単一セグメントです。** SDK は Template パラメータを `[^/]+` で
+マッチするため、生の `/` を運べません: 素のファイル名はそのまま使えますが、完全な
+`.agent-team/plans/<file>` 形式は Percent-encode が必要です
+（`.agent-team%2Fplans%2F<file>`）。値は解決される前に decode されますが、それこそが
+ガードを飾りでなく実効的なものにしています — `%2E%2E%2F` はファイルシステムに届く
+時点で `../` であり、`plan_read` は plans サブツリーから出るパスをすべて拒否します。
+
+## Prompts
+
+**ユーザー**が埋める三つのテンプレートであって、モデル向けの説明ではありません:
+Client はこれらを人に、たいていはスラッシュコマンドとして提示し、返ってきたものが
+その人のメッセージに挿入されます。したがって各プロンプトは、送信されればそれ単体で
+成立する、埋め込み済みの指示としてレンダリングされます。
+
+| Prompt | 引数 | 何を求めるか |
+|---|---|---|
+| `delegate_to_pane` | `target`, `task` | `target` がアドレスする CLI Pane に `cli_send` で `task` を送り、自分で作業せずに止まって返事を待つこと。そのアドレスが名簿に無ければ先に `cli_list_targets` を実行し、似た名前を推測せずどの Pane のことかユーザーに尋ねること。送るメッセージの中で、`target` に対し完了したら `cli_send` で報告するよう伝えること |
+| `start_pipeline` | `task` | この Workspace の Pipeline を `task` に対して開始すること。ただしその前に `pipeline_status` で既に実行が進行中でないかを、`pipeline_list` でどの Stage が開かれるかを読み、何が開かれようとしているかをユーザーに伝え（これは CLI クォータを消費します）、go の合図を待つこと。その後、実行が本当に開始されたかを報告し、されなかった場合はウィンドウが挙げた理由を述べること |
+| `review_plan` | `rel_path` | `rel_path` の Plan Document を `plan_read` で読み、レビュアーとして通し、Plan が主張していることはコードと突き合わせて確認すること。発見は一件につき一つ、行動に移せる具体性で `plan_add_note` によって Document 自身に記録し、ここで報告するだけにしないこと。最後に、その Plan が現状のまま承認できるかを述べること |
 
 ## Pane の id は Pane より長く生きる
 

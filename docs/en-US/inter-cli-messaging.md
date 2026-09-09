@@ -781,6 +781,6 @@ still never persisted.
 | Whether a CLI queues input mid-turn | `src/renderer/src/platform/plugin-shell/agents/<key>.ts` (`acceptsMidTurnInput`) |
 | The recipient's view of the queue | `backend/agent_team_backend/agent_message_log.py` (`pending_incoming`) |
 | The installed hook command, and which event keeps its response | `backend/agent_team_backend/claude_hooks.py` |
-| Delivery outcome and hold, as an MCP caller reads them | `backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py` |
+| Delivery outcome and hold, as an MCP caller reads them | `backend/agent_team_backend/mcp_server/server.py` |
 | The protocol text handed to agents | `src/renderer/src/data/stages.ts` |
 | The delivery log UI | `src/renderer/src/components/AgentMessagesPanel.vue` |

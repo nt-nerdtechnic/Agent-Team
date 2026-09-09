@@ -48,10 +48,10 @@ Workspace。沒有 Pane 也意味著沒有分頁群組：host 與外部呼叫端
 `to: "group"` 廣播會以 `no-group` 被拒絕 —— 它既沒有自己的群組可以扇出，也沒有視
 窗可以問。請改成逐一定址，或用 `pane_id`。
 
-實作：[`plan_mcp.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py)
-（Tool）、[`plan_mcp_auth.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp_auth.py)
+實作：[`mcp_server/server.py`](../../backend/agent_team_backend/mcp_server/server.py)
+（Tool）、[`mcp_server/auth.py`](../../backend/agent_team_backend/mcp_server/auth.py)
 （憑證儲存，位於 App Data 目錄下的 `plan_mcp_auth.json`），以及
-[`plan_mcp_wiring.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp_wiring.py)
+[`mcp_server/wiring.py`](../../backend/agent_team_backend/mcp_server/wiring.py)
 （Pane／host 接線 —— 外部 Client 不需要）。
 
 ## Tool 目錄
@@ -97,6 +97,7 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 | `cli_read_incoming` | `uid=""`、`limit=5`（上限 20）、`include_delivered=false`、`peek=false` | **僅限 CLI Pane。** 寄給你的訊息**全文**——`cli_pending_incoming` 只給 200 字元且壓平空白：`{count, messages: [{uid, sender, status, kind?, content, age_seconds, consumed, correlation_id?, in_reply_to?, hold?, held_for_s?, stale?}], note?}`。**預設讀取即消費**，讀過的訊息不會再注入你的輸入框；`peek: true` 只讀不消費。消費採「先保留、後釋放」，釋放若遺失，訊息會退回佇列並可能再送達一次；`consumed` 逐則回報，未消費的原因寫在 `note` |
 | `cli_send_and_wait` | `to`、`text`、`timeout_s=60`（上限 120）、`pane_id?` | `cli_send` 再加上等待該回合結束；回傳 `cli_wait_idle` 的結果，外加 `{ok, target, msg_key}`  **遠端 Pane**：送出與送達閘門與本機相同（`rejected` 仍與 `failed` 分開）；等待那半用名冊狀態字，弱點與 `cli_wait_idle` 相同。 |
 | `cli_open_agent` | `agent`、`name`、`task`、`workspace_path`（非 Pane 呼叫端必填）、`model`、`effort` | 帶著一項任務 Spawn 新的 CLI Pane；回傳 `{ok, name, address, pane_id}`，若該次 Spawn 跨過 Advisory 門檻則另附 `advisories`。`model` 與 `effort` 為選填，該 CLI 不支援時會「拒絕」而非忽略，Pane 不會悄悄用別的模型啟動。多數 CLI 接受 model；接受獨立 effort 的較少，其餘把 effort 編在 model id 裡（`gpt-5.3-codex-high`）。model id 不做驗證（每次改版都會變），effort 則會對照該 CLI 的合法值檢查 |
+| `cli_close_agent` | `target`、`pane_id?` | 關掉一個 Pane —— `cli_open_agent` 的另一半。**這會直接終結對方的工作**：Pane 與它的 PTY 一併消失，正在跑的回合跟著死掉，排給它的訊息永遠不會送達，而且無法復原 —— 關掉的 Pane 是 Session 沒了，不是暫存起來。動手前先用 `cli_get_status` 看它是不是正在做事；`cli_interrupt` 是比較軟的一階，`cli_send` 更軟（它會等回合做完）。回傳 `{ok, target, name, closed, advisories?}`，`advisories` 說明這次關閉的代價，而且是別人不會回報的那些：Pane 正在回合中、有訊息排在它的佇列裡、它底下有子 Pane 現在變成孤兒。這些都在 Kill 之前先蒐集，因為事後就再也問不到了。僅限本機 Pane：`<device>/<workspace>/<pane>` 這種位址會以 `close-local-only` 失敗，那是這個 Tool 的限制，不是位址寫錯 |
 
 `cli_send` 在訊息*被接受*遞送時就回傳，不是在另一個 Agent 讀到時才回傳。
 `cli_check_message` 補上這個閉環：`status` 可能是 `queued`（已廣播，尚無視窗
@@ -224,6 +225,7 @@ Diagnostics，可透過 `ui_diagnostics` 讀取。
 | `cli_get_status` | `target`、`pane_id?` | `{busy, agent_key, last_activity?, ui?}` —— 當擁有該 Pane 的視窗有回應時，`ui` 鏡射 `ui.pane.getStatus`  **遠端 Pane**：答案來自名冊，帶 `remote: true` 與 `source: "roster_status"`——只有一個狀態字，沒有 `last_activity`、沒有 `ui` 區塊，且有 0.5 秒 debounce 與 30 秒掃描，所以是準即時而非即時。 |
 | `cli_wait_idle` | `target`、`timeout_s=60`（上限 120）、`pane_id?` | 阻擋直到該 Pane 進入 Idle 或逾時；回傳 `{idle, source, waited_s, last_activity?, ui_status?}`，逾時再加上 `reason`  **遠端 Pane**：輪詢名冊的狀態字。`source` 是 `roster_status` 或 `roster_offline`，**絕不會是** `turn_complete`——遠端最強的觀察就只是「狀態字不再顯示忙碌」。停在提示上的 pane 會以 `reason: "awaiting_unclassified"` 逾時，因為名冊只帶一個字，無法分辨「卡在權限提示（等的是人）」與「agent 在問問題（其實可視為閒置）」。`offline` 是真正的第三種答案，會立刻回傳而不是等到逾時。 |
 | `cli_interrupt` | `target`、`pane_id` | 送出該 CLI 的中斷鍵給本機的 pane——codex 是 `ESC`，其餘是 `^C`。**這不等於停止**：依 CLI 而異，可能中止當前回合、可能只是清空輸入框、第二次按下甚至可能直接離開 CLI。它是一個按鍵，不是一道指令。用 `cli_get_status`／`cli_wait_idle` 確認結果；若那件工作可以讓它做完，改用 `cli_send` 傳話。回傳 `{ok, target, name, sent, status_before, advisories?}`——`sent: false` 代表根本沒送出（沒有 session，或視窗正在重連）。僅限本機 pane |
+| `cli_message_log` | `limit=50`（上限 200） | **僅限 CLI Pane。** 你自己的訊息歷史 —— 你送出過什麼、什麼送到了你這裡，最新的在最後。`cli_inbox_summary` 只回報你卡住的送出，`cli_pending_incoming` 只回報還沒送達的收件；訊息一旦落地就同時離開這兩者，Compaction 之後也從你的 Context 裡消失，所以「我們先前到底說了什麼」只有這裡答得出來。這是持久化的記錄，後端重啟後仍在，而且在這裡讀取永遠不會把任何訊息從別人的佇列上拿走。只會回傳屬於你的列：以你**目前**的傳訊名稱比對寄件者或收件者，所以排給某個你後來改掉的名字的訊息，就不再算是你的。回傳 `{ok, count, messages, scanned, truncated}`；每則訊息是 `{uid, created_at, status, sender, recipient, direction, excerpt}`，有值時再加上 `kind`／`reason`／`delivered_at`／`correlation_id`／`reply_to`／`remote`／`remote_workspace`。`excerpt` 是壓平空白後的 200 字元 —— 要全文請用 `cli_read_incoming`。`truncated` 代表較舊的訊息被截掉了，可能是被 `limit`、也可能是被這次掃描的近期列視窗切掉；`scanned` 是那個視窗掃了幾列 |
 
 `cli_read_log` 的 `since` 提供增量讀取：把上一次呼叫回傳的 `next_cursor` 傳回來，
 就只會拿到該 Pane 自那之後說的內容，而不必重讀同一段尾端。這個 Cursor 是
@@ -266,6 +268,7 @@ copilot/cursor/droid/kilo/muse/opencode 的 `turn_complete` 是 CLI 自己說回
 | `ui_list_actions` | `workspace_path` | 列出擁有 `workspace_path` 的 Navide 視窗中註冊的每一個 Command id |
 | `ui_invoke` | `workspace_path`、`action`、`args?` | 呼叫一個已註冊的 Action，`args` 原樣傳入 |
 | `ui_snapshot` | `workspace_path` | 該視窗 UI 狀態的結構化快照 |
+| `ui_diagnostics` | `workspace_path`、`since_seq=0`、`pane_id`、`limit=50` | 該視窗自己記下的 Renderer 端診斷 —— 例如 `injectText` 因為 Echo 檢查逾時而重送內容，或乾脆放棄 —— 這些是 `ui_invoke` 呼叫端光看 `ok: true` 看不出來的，過去只出現在那個視窗的 DevTools Console 裡。當某個 Tool 回報成功、但視窗裡的實際行為看起來不對（重複輸入、送出卡住）時用它來診斷。`since_seq` 只回傳序號在它之後的項目，所以把上一次的 `nextSeq` 傳回來就能增量輪詢 |
 
 這三者都會等待擁有該 Workspace 的視窗回應最多 15 秒，若目前沒有任何視窗開著
 `workspace_path` 就會錯誤（以完全相同的字串比對 —— 請傳入該視窗被開啟時所用的
@@ -295,10 +298,12 @@ Action —— `ui.pane.create`、`ui.preview.show`、`ui.window.openGit` —— 
 |---|---|---|
 | `ui.settings.open` | `{tab?}`（`general`、`mcp`、`analyzer`、`updates`、`appearance`、`accounts`、`storage`、`keybindings` 之一） | 開啟 Settings，可指定切到特定分頁 |
 | `ui.settings.close` | — | 關閉 Settings |
+| `ui.settings.yolo` | `{yolo?}` | 讀取全域的 CLI 權限略過開關；有給 `yolo` 就設定它。回傳 `{yolo, agents}`，每個 agent 是 `{agent, mode, skipFlag}`。它不是 Workspace 範圍的：任何視窗都能回答，而且單一廠商的答案是 `skipFlag`，不是 `yolo` |
 | `ui.pane.create` | `{agent, name?, task?}` | 在該視窗已開啟的 Workspace 中為 `agent` Spawn 一個 Pane；若有給 `task`，會作為 Kickoff Prompt 送出並略過 Role 注入 |
 | `ui.pane.close` | `{paneId}` | Kill 一個 Pane |
 | `ui.pane.focus` | `{paneId}` | 顯示並聚焦一個 Pane（必要時切換分頁） |
 | `ui.pane.getStatus` | `{paneId}` | 回傳該 Pane 的 `{status, buffer, logPath?}` |
+| `ui.pane.interrupt` | `{paneId}` | 對該 Pane 按下它的中斷鍵。回傳 `{sent, status, advisories?}` —— `status` 是在按下**之前**讀的，因為這一按會改變它自己要回報的那個狀態 |
 | `ui.tab.switch` | `{tabId}` | 切換作用中的 Stage／Run-group 分頁 |
 | `ui.preview.show` | `{kind, …}` | 在右側 rail 的預覽面板顯示檔案、diff 或內嵌片段 |
 | `ui.window.openPlans` | — | 開啟 Plan 視窗 |
@@ -306,6 +311,16 @@ Action —— `ui.pane.create`、`ui.preview.show`、`ui.window.openGit` —— 
 | `ui.window.openPipeline` | `{pipelineId?}` | 開啟 Pipeline Manager 視窗 |
 | `ui.workspace.open` | `{path}` | 將 `path` 開啟為 Workspace（路由到任一 Live 視窗 —— 見上文） |
 | `ui.layout.setMode` | `{mode}` | 變更 Pane Layout 模式 |
+| `ui.pipeline.start` | `{task?, pipelineId?}` | 在該視窗已開啟的 Workspace 啟動一次 Pipeline 執行。以下情況會報錯：沒有開啟的 Workspace、已經有一輪在跑（要先 Abort）、沒給 `pipelineId` 而這個 Workspace 也沒有選定的 Pipeline、或這一輪最後沒有真的進入 `running`。回傳 `{pipelineId, stages, workspacePath, state}` |
+| `ui.pipeline.abort` | — | 中止進行中的那一輪；沒有東西在跑時會報錯，而不是對一個空操作回 ok。回傳 `{workspacePath, state}` |
+| `ui.pipeline.next` | — | 讓進行中的 Pipeline 立刻推進到下一個 Stage。以下情況會報錯：沒有一輪在 `running`、目前已經是最後一個 Stage（沒有下一個可推進，視窗會拒絕，而不是替一個說「往前走」的呼叫端把整輪標成完成）、或 Stage 索引其實沒有前進。回傳 `{workspacePath, state, stageIndex, stages}` |
+| `ui.pipeline.resume` | — | 從最後一個完成的 Stage 之後，接續這個 Workspace 記錄下來的那一輪。以下情況會報錯：沒有開啟的 Workspace、已經有一輪在跑（要先 Abort）、沒有記錄中的執行或它已經沒有剩下的 Stage、或恢復後始終沒有進入 `running`。回傳 `{workspacePath, state, stageIndex, stages}` |
+| `ui.pipeline.reset` | — | 關掉該視窗 Workspace 裡的每一個 Pane（包含手動開的），並把這一輪清回 idle。沒有開啟的 Workspace、或狀態最後沒有落在 `idle` 時會報錯。回傳 `{workspacePath, state, stageIndex}` |
+| `ui.pipeline.restart` | — | 用同一段任務從第一個 Stage 重跑記錄中的那一輪；任務先取自記錄中的執行，其次才是畫面上的任務欄位。以下情況會報錯：沒有開啟的 Workspace、已經有一輪在跑、沒有先前的任務可以重來、或重啟後始終沒有進入 `running`。回傳 `{pipelineId, stages, workspacePath, state, stageIndex}` |
+| `ui.messaging.readIncoming` | `{paneId, uids?, limit?, includeDelivered?, reserve?, maxChars?}` | 從視窗自己的佇列讀取該 Pane 的收件，以 Pane 目前的傳訊名稱比對。回傳 `{messages, reserved, paused}`；每則訊息是 `{uid, sender, status, kind, content, createdAt, correlationId, inReplyTo, hold}`。只有仍在 `queued` 的列會被保留，已送達的歷史可讀但無法消費（它已經被消費過了），`reserve: false` 則只讀不保留。`paused` 是「明明有信卻讀到空的」的原因，用來把「現在收不了」和「你沒有信」分開 |
+| `ui.messaging.settleRead` | `{paneId, uids, ok?}` | 結算 `ui.messaging.readIncoming` 拿走的保留：`ok` 只要不是 `false` 就消費掉那些 uid，`ok: false` 代表呼叫端在說文字根本沒送到，於是釋放保留、讓訊息回到佇列原位。回傳 `{settled}` |
+| `ui.groupPeers` | `{paneId}` | 從 `paneId` 發出的 `group` 廣播會送到哪些 Pane —— 群組成員是後端從不知道的 UI 狀態，所以只能問擁有寄件 Pane 的那個視窗。回傳 `{group_id, peers: [{pane_id, name}]}`；未分組的 Pane 共用一個合成的 `manual` 群組，因此會廣播給彼此，而不是誰都收不到 |
+| `ui.diagnostics.read` | `{sinceSeq?, paneId?, limit?}` | `ui_diagnostics` 底下的那個 Action。回傳 `{entries, nextSeq}` |
 
 這份清單維護在程式碼裡，不是在這裡 —— 在依賴確切的參數形狀之前，請對照
 [`App.vue`](../../src/renderer/src/App.vue) 中的
@@ -319,7 +334,7 @@ openWorkspaces}`。
 ### 預覽記錄
 
 每個 Workspace 都保有一條「這裡被改了什麼、被顯示了什麼」的記錄軌，持久化在該
-Workspace 的 `.agent-team/navide.db`，重啟 Navide 後仍在。這三個 Tool 是 Agent
+Workspace 的 `.agent-team/navide.db`，重啟 Navide 後仍在。這些 Tool 是 Agent
 這一端的入口：回報自己的寫入、讀回其他寫入者回報的內容，以及把某個東西推到使用者
 眼前。
 
@@ -328,6 +343,7 @@ Workspace 的 `.agent-team/navide.db`，重啟 Navide 後仍在。這三個 Tool
 | `preview_record` | `rel_path`、`change="modified"`、`note`、`kind="file"`、`content`、`title`、`workspace_path` | 回報你剛剛建立、修改或刪除的檔案；回傳 `{uid, created_at, rel_path, change, merged}`，外加 `warning?` |
 | `preview_list` | `limit=50`（上限 300）、`since=0`、`change`、`agent`、`workspace_path` | 讀回這條記錄軌，最新的在前；回傳 `{workspace_path, entries, truncated}`，外加 `warning?` |
 | `preview_show` | `rel_path`、`kind="file"`、`content`、`title`、`workspace_path` | 把檔案、diff 或內嵌內容推進右側 rail 的預覽面板；回傳視窗自己的 `{ok, result, error}` 外加 `recorded`，`ok` 時再加上 `uid`、`merged` 與 `warning?` |
+| `preview_clear` | `workspace_path`、`before=0` | 清空這條記錄軌 —— 繼 record、list、show 之後的第四個動詞。**這會刪掉使用者在預覽面板看得到的列，而且無法復原**，清掉的也不只你自己的紀錄：檔案 Watcher 的、使用者的都在同一條軌上。`before` 是 `preview_list` 給的 `created_at`（epoch 毫秒）：戳記早於它的列會被清掉，等於或晚於它的一律保留 —— 這正是「其他 Session 還在寫入時清理仍然安全」的原因；留在 0 就是整條清空。回傳 `{workspace_path, removed, before}`，外加 `warning?` |
 
 `workspace_path` 的行為與 `plan_*` 這組 Tool 完全一致：Pane 呼叫端可以省略它，會取
 得該 Pane 自己的 Workspace；Host 或外部呼叫端沒有 Pane 身分，必須傳入，否則呼叫會
@@ -369,6 +385,165 @@ Hook 機制的廠商，目前是 **claude、qwen 與 copilot**。其餘所有檔
 watcher 兜底，以 `source: "watcher"` 且無歸屬的形式記錄。因此 `preview_list` 看到的
 畫面比該 Workspace 上所有 `preview_record` 呼叫的總和更完整，而沒有 `pane_id` 的
 記錄代表沒有人認領這次變更 —— 不是沒有東西造成它。
+
+### 額度與 Token 花費
+
+| Tool | 參數 | 功能 |
+|---|---|---|
+| `cli_usage` | `agent=""` | 各家 CLI 還剩多少額度，以 Navide 追蹤到的為準。把工作交給別的 Pane 之前值得先看：`cli_send` 對一個方案已經耗盡的 CLI 一樣會照排不誤，訊息送到了、只是換對方在那裡失敗。`agent` 可把答案縮到單一廠商鍵（`claude`、`codex`……），就是 `cli_whoami` 回報的那個 `agent_key`；留空則回傳所有被追蹤的廠商。回傳 `{ok, providers, accounts, enabled, intervalSec}`，有過濾時再加上 `agent`：`providers` 是廠商鍵對應它當下的快照，`accounts` 是廠商鍵對應該廠商的各帳號快照（僅限 Navide 會追蹤多組登入的廠商），以帳號 slot 為鍵。這些數字是各廠商自己的，原樣呈現，Navide 既不重算也不加註，所以請讀該廠商實際給的欄位，不要預期所有廠商同一種形狀。`enabled: false` 代表額度輪詢被關掉了，這裡的東西只是最後一次讀到的值。完全沒有條目的廠商，是 Navide 讀不到它的額度 —— 這跟「這家還有額度」不是同一句話 |
+| `cli_token_stats` | `workspace_path` | 這個 Workspace 花掉多少 Token，以 Navide 的計數為準 —— 就是 Token 面板背後的那些數字。回傳 `{workspace_path, current_run, cumulative, runs, runs_truncated, live_sessions, live_session_count, all_time, by_vendor, by_day}`。`cumulative` 是這個專案的總計，含 `by_vendor` 與 `by_stage` 拆解；`all_time` 與 `by_vendor` 是所有專案的；沒有 Pipeline 執行開著時 `current_run` 為 `null`；`runs` 是最近幾輪已封存的執行，只有彙總值，較舊的被切掉時 `runs_truncated` 為真；`live_sessions` 是現在跑得最兇的幾個 CLI Session（各自 `{input, output, calls}`），`live_session_count` 是總共有幾個，`by_day` 則是最近一週的全域用量。計數的來源是各廠商自己的 Session Log，所以 Navide 讀不到 Log 的廠商是「沒有貢獻」，而不是回一個零。`cli_usage` 是另外一半 —— 那邊是廠商端還剩多少額度，這邊是這裡記錄到的花費 |
+
+### Workspace、Skills 與指示檔
+
+三個唯讀盤點。它們各自回答一個上面那些 Tool 預設你已經知道答案的問題：哪些路徑
+是 Workspace、寫指示給某個 CLI 之前它本來就拿到了什麼、以及這個專案本身已經說過
+什麼。
+
+| Tool | 參數 | 功能 |
+|---|---|---|
+| `workspace_list` | — | Navide 知道的專案，最近開啟的在前 —— `plan_create`、`preview_record`、`cli_open_agent` 都要一個專案根目錄的絕對路徑，而這就是那份清單。回傳 `{workspaces, live_pane_workspaces}`。每個 Workspace 帶著 Store 自己的紀錄（`path`、`name`、`last_opened_at`、`pinned`、`exists`），外加 `has_live_panes`：現在真的有 CLI Pane 跑在裡面時為真。優先挑這種 —— `has_live_panes` 為 false 的 Workspace 沒有任何 Navide 視窗在看它，寫進去的 Plan 或預覽根本不會呈現給使用者；`exists` 為 false 更嚴重，那是資料夾已經從磁碟上消失了。`live_pane_workspaces` 是那個 Live 集合本身（已解析）：Pane 可能跑在使用者從來沒從歡迎畫面開過的專案裡，那仍然是完全合法的 `workspace_path`，只是最近清單不會提到它 |
+| `skills_list` | — | Navide 管理的 Skills，以及其中哪些會送到你手上。Skill 是一包按需載入的指示資料夾；Navide 保有一個共用庫（使用者可以投遞給任何廠商），同時也反射各家 CLI 自己目錄裡的那些。自己動手寫指示之前先讀這個，或用它告訴使用者哪個 Skill 剛好涵蓋他問的事。回傳 `{skills, native, root, agents}`。每個共用 Skill 是 `{name, description, enabled, targets, managed, valid, native_conflict}` —— `targets` 為 null 代表每家廠商都收得到，是清單就代表只有那幾家，`enabled` 為 false 代表誰都收不到。每個 native 條目是 `{name, description, source, owner_agent, real_path, valid}`，也就是某家 CLI 本來就有的 Skill。`agents` 是每家廠商與它的投遞支援程度（`wired`／`planned`／`unsupported`），讓「沒有投遞」和「無法投遞」不會混在一起。`delivered_to_me` 是關於你的那一半 —— `{agent_key, skills, native_paths}`，也就是你自己的 CLI 實際被給了哪些；沒有 Pane 身分的呼叫端不會有這個欄位，因為它不是任何人的投遞對象。只有名稱與描述：Skill 的指示內容是你要用它的時候從它自己的資料夾讀，不是從這裡。唯讀 —— 要不要投遞某個 Skill 是使用者在 Settings 裡的決定 |
+| `memory_list` | `workspace_path`、`path=""` | 這裡的 CLI 會載入的指示檔 —— `CLAUDE.md`、`AGENTS.md`、`GEMINI.md` 等等，包含這個專案裡的與使用者家目錄裡的。不帶 `path` 時只列 Metadata：`{workspace_path, files, agents}`，每個檔案是 `scope`（`user` 或 `project`）、`path`、`relative`、`readers`（會載入它的廠商鍵）、`canonical`、`exists`、`size`、`modified`、`error`。還不存在的檔案一樣會被列出來，因為它標示的是「某個慣例該寫在哪裡」；`agents` 是每家廠商與 Navide 找它檔案的方式（`mapped` 或 `configured`）。帶 `path` 時回傳那一個檔案：`{workspace_path, file, path, text, exists, modified}` —— 而且路徑必須是這份清單報過的，其他一律拒絕，所以這不是一條讀任意檔案的路。唯讀：編輯指示檔是使用者在 Settings 裡的決定，這裡沒有對應的 Tool。沒有 Workspace 時只會列出 user 範圍的檔案 |
+
+### Pipeline
+
+Pipeline 是一份存起來的多階段執行：一組有序的 Stage，每個 Stage 有若干 Slot，
+指名哪個 CLI 扮演哪個角色。前兩個 Tool 是讀，後六個會真的驅動一輪執行。
+
+| Tool | 參數 | 功能 |
+|---|---|---|
+| `pipeline_list` | — | 這台機器上有哪些 Pipeline 樣板，以及它們的 Stage 從哪些 Role 選角。回傳 `{pipelines, active_pipeline_id, roles}`：每個 Pipeline 是 `{id, name, builtin, stage_count, stages}`，每個 Stage 是 `{id, title, short_title, description, sentinel, allow_questions, recommended_roles, slots}`，每個 Slot 是 `{agent_key, role_key, label, is_commander}`。`roles` 給出每個 Role 的 `{key, label, one_line, is_default}` —— 足以知道某個 `role_key` 是什麼意思。有兩樣東西是刻意不放進來的，因為它們本身就是整段 Prompt：Slot 的 Kickoff 內文，以及 Role 的 System Prompt。`active_pipeline_id` 是 Pipelines 視窗目前選定的樣板。這裡只有樣板 —— 某一輪跑到哪了要看 `pipeline_status` |
+| `pipeline_status` | `workspace_path` | 某個 Workspace 的 Pipeline 執行跑到哪了（如果它有的話）—— 用它來確認自己是不是某個更大流程的一部分：以 Pipeline Slot 身分被開出來的 Pane 只被告知任務，不會被告知自己是五個 Stage 裡的第三個，而下一個 Stage 要等你這個被記為完成之後才會開始。回傳 `{workspace_path, active, …}`；`active` 只在一輪執行進行中時為真，而從來沒跑過 Pipeline 的 Workspace 就只回 `{workspace_path, active: false}`，那是空狀態，不是錯誤。有專案紀錄時還會帶：`state`（`idle`／`running`／`completed`／`aborted`）、`task_description`（這一輪是為了什麼而啟動）、`pipeline_id`（`pipeline_list` 裡的哪個樣板）、`current_stage_index` 與 `total_stages`、`run_count`、`log_file_name`、`updated_at`，外加 `stages`（各是 `{stage_id, title, agent, role, pane_id, status, started_at, ended_at}`）與 `panes`，也就是 Pipeline 的 Slot：`{pane_id, agent, role, stage_id, stage_index, slot_label, spawn_status, kickoff_status}`。使用者或 Agent 手動開的 Pane 不是 Pipeline Slot，不會列在這裡；要看全部的 Pane 請用 `cli_list_targets` |
+| `pipeline_start` | `task`、`pipeline_id`、`workspace_path` | 啟動一輪執行：開出第一個 Stage 的 Pane 並把任務交給它們。**這會開 CLI Pane 並消耗它們的額度** —— Stage 的每個 Slot 都是一個全新的 CLI 行程，有自己的 Context 也有自己的帳單，而且後續 Stage 會隨著執行推進陸續開出來。先讀 `pipeline_list` 看這台機器有哪些樣板、每個樣板由什麼組成，再讀 `pipeline_status` 看是不是已經有一輪在跑；憑猜測啟動不是可以走的路。`pipeline_id` 是要跑的樣板 id，就是 `pipeline_list` 報的那個；留空則跑這個 Workspace 目前選定的 Pipeline，而沒有選定任何 Pipeline 的 Workspace 會直接拒絕，不會替你挑一個。`task` 是這一輪要做的事 —— 每個 Stage 的 Kickoff 訊息就是從這段文字組出來的。回傳視窗自己的 `{ok, result, error}`，`result` 帶 `{pipelineId, stages, workspacePath, state}`。`ok` 為 false 代表什麼都沒啟動：已經有一輪在跑（先 Abort）、沒有 Pipeline 可跑、或第一個 Stage 的 Pane 全部 Spawn 失敗。視窗回報的是這一輪自己的狀態，而不是「呼叫有回來」這件事，所以這裡的 ok 不會是「啟動了但什麼也沒發生」那種答案 |
+| `pipeline_abort` | `workspace_path` | 停掉某個 Workspace 進行中的那一輪。Abort 是暫停，不是 Kill：編排會停下來（不再啟動下一個 Stage、Pane 之間不再路由），已經開著的 Pane 連同它們的工作都原封不動留著，使用者可以從視窗接著顯示的橫幅恢復這一輪。什麼都不會被刪除。回傳視窗自己的 `{ok, result, error}`，`result` 帶 `{workspacePath, state}`；`ok` 為 false 通常代表根本沒有執行在進行中，`pipeline_status` 可以確認 |
+| `pipeline_next` | `workspace_path` | 立刻讓這一輪推進到下一個 Stage，不等視窗自己判定目前這個 Stage 已完成。**這會開 CLI Pane 並消耗它們的額度** —— 下一個 Stage 的每個 Slot 會馬上被 Spawn 出來，而目前 Stage 還在跑的工作不會被等待，它的產出就是到不了後面那個 Stage。先讀 `pipeline_status` 的 `current_stage_index` 與 `total_stages`：已經在最後一個 Stage 時沒有下一個可推進，這個呼叫會被拒絕，而不是把整輪標成完成。回傳視窗自己的 `{ok, result, error}`，`result` 帶 `{workspacePath, state, stageIndex, stages}`；`ok` 為 false 代表什麼都沒推進，通常是因為根本沒有執行在進行中 |
+| `pipeline_resume` | `workspace_path` | 把被 Abort 或中斷的那一輪，從它停下來的地方接著跑 —— 這是 `pipeline_abort` 的另一半。記錄中的執行會從最後一個完成的 Stage 之後接續，並 Spawn 該 Stage 的 Pane，所以**這會開 CLI Pane 並消耗它們的額度**；但已經做出來的進度會保留下來：相對於 `pipeline_reset` 與 `pipeline_restart`，這是回到一輪執行裡的非破壞性作法。恢復時是對著它當初啟動時的那個 Pipeline 進行，若作用中的 Pipeline 已經換過會先換回來；而如果那個樣板已經不在，或它的 Stage 數已經到不了記錄中的索引，恢復會停下來並說明原因，而不是拿一個不相干的 Stage 去跑這一輪的任務。回傳 `{ok, result, error}`，`result` 帶 `{workspacePath, state, stageIndex, stages}`；`ok` 為 false 代表什麼都沒恢復 —— 沒有記錄中的執行，或已經有一輪在跑 |
+| `pipeline_reset` | `workspace_path` | **有破壞性，而且範圍比名字聽起來大。** `pipeline_abort` 是暫停編排、讓 Pane 活著等你恢復；Reset 則是把這個 Workspace 裡的**每一個** Pane 都拆掉 —— Pipeline 開的**和**使用者或其他 Agent 手動開的都一樣 —— 並把 Workspace 清回 idle，這一輪的任務、Stage 索引與 Log 一併清空。之後沒有恢復可言，也沒有復原。先讀 `pipeline_status` 看這一輪跑到哪、用 `cli_list_targets` 看有哪些 Pane 即將被關掉；如果只是想停下這一輪，`pipeline_abort` 會保住這些工作。回傳 `{ok, result, error}`，`result` 帶 `{workspacePath, state, stageIndex}` |
+| `pipeline_restart` | `workspace_path` | **有破壞性，而且會開 CLI Pane 並消耗它們的額度。** 把目前這一輪整個丟掉 —— Pipeline 開的 Pane 全部關閉、記錄的進度全部作廢 —— 然後用同一段任務、同一個 Pipeline 從第一個 Stage 重跑，所以已經跑完的那些 Stage 是付過錢又再跑一次。沒有復原。任務先取自記錄中的執行、其次才是畫面上的任務欄位，兩者都沒有的 Workspace 會被拒絕；已經有一輪在 `running` 時也會被拒絕（要先 Abort）。先讀 `pipeline_status`：一輪已經跑到第三個 Stage，就是三個 Stage 的工作要重做；如果目的只是越過一個卡住的 Stage，`pipeline_next` 不會浪費已經花掉的部分。回傳 `{ok, result, error}`，`result` 帶 `{pipelineId, stages, workspacePath, state, stageIndex}` |
+
+啟動與中止都是 Renderer 的工作 —— 後端自己的 `pipeline.start` handler 只寫執行
+紀錄，各 Stage 的 Pane 是由視窗 Spawn 出來的 —— 所以這兩個 Tool 是走 UI Action Bus
+（`ui.pipeline.start`／`ui.pipeline.abort`），也繼承它的規則：需要一個開著
+`workspace_path` 的 Live 視窗，並且最多等它 15 秒。`workspace_path` 的行為和其他地方
+一致：Pane 呼叫端可以省略，省略就是自己的 Workspace。
+
+`pipeline_next`、`pipeline_resume`、`pipeline_reset`、`pipeline_restart` 也是同樣的
+形狀、同樣的理由 —— 編排歸 Renderer 管，所以它們分別走 `ui.pipeline.next`／`.resume`
+／`.reset`／`.restart`，並繼承同一條「要有開著該 Workspace 的 Live 視窗」規則與 15 秒
+等待。它們就是使用者在視窗上按的那幾顆按鈕，只是改用 MCP 定址。
+
+#### 編輯樣板
+
+另外三個 Tool 寫的是「一輪執行是從什麼定義組出來的」。和上面六個不同，它們**不**走視窗：
+它們直接寫後端自己的 Store，並廣播與 WS handler 相同的 `pipelines.changed`／
+`stages.changed`／`roles.changed` 事件，所以開著的 Pipelines 視窗會自己更新。這三個的
+讀取端都是 `pipeline_list`。
+
+| Tool | 參數 | 功能 |
+|---|---|---|
+| `pipeline_define` | `op`、`pipeline_id`、`name`、`workspace_path` | 建立、更名、刪除或重新灌入一個 Pipeline **樣板** —— 也就是 `pipeline_start` 會跑的那組具名、有序的 Stage。這裡的任何操作都不會啟動、停止或推進一輪執行。回傳 `{ok, op, pipelines, active_pipeline_id}`，會產生 Pipeline 的那些 op（`create`、`rename`、`reset_builtin`）另外帶 `pipeline`。新建的 Pipeline 是空的，也不會被設為作用中，所以在 `stage_define` 給它 Stage 之前跑不起來。最後一個 Pipeline 完全不能刪；而刪掉一個 Pipeline 不會停下或倒回已經啟動的執行 —— 那一輪保有自己記錄的 `pipeline_id` 與已經開出來的 Pane，壞掉的是「之後要恢復它」，因為它指名的樣板不見了 |
+| `stage_define` | `op`、`pipeline_id`、`stage_id`、`stage`、`ids`、`workspace_path` | 在一個 Pipeline 裡新增、編輯、移除、重新排序或重新灌入它的 **Stage**。一個 Stage 是一個步驟，裡面裝著會變成 Pane 的 Slot：每個 Slot 指名一個 CLI（`agent_key`）與一個 Role（`role_key`），並帶著那個 Pane 啟動時要用的 Kickoff 文字。`pipeline_id` 留空代表**作用中**的那個 Pipeline，也就是 Pipelines 視窗選定的那個，不一定是你剛才在讀的那個 —— 請明寫。回傳 `{ok, op, stages, pipeline_id, pipelines, active_pipeline_id}`，`upsert` 另外帶 `stage`。一個 Pipeline 的最後一個 Stage 不能刪 |
+| `role_define` | `op`、`key`、`new_key`、`label`、`one_line`、`system_prompt` | 建立、編輯、更名、刪除或重新灌入 Slot 選角用的 **Role**。Role 就是一段有名字的 System Prompt：Slot 以 `role_key` 指名一個，而那個 Slot 開出來的 Pane 就以這段 Prompt 啟動。Role 是整台機器共用的 —— 不分 Pipeline、不分 Workspace —— 所以這裡改一次會影響每個指名該 Role 的 Pipeline，也因此沒有 `workspace_path` 可以縮小範圍。回傳 `{ok, op, roles}`，`upsert` 與 `rename` 另外帶 `role`，`rename` 還帶 `repointed_pipeline_ids`。最後一個 Role 不能刪。已經開起來的 Pane 會保留它拿到的那段 Prompt；改動影響的是那個 Slot 下一次開出來的 Pane，不是螢幕上這些 |
+
+**每個 `op` 各需要哪些參數。** 這是這三個 Tool 最容易用錯的地方：`op` 決定了其他參數
+哪些是必要的，缺了就會回 `ok: false` 帶 `error_code: "missing_argument"`，而且什麼都
+沒寫進去。不認得的 `op` 則是 `"bad_op"`。
+
+| Tool | `op` | 需要 | 說明 |
+|---|---|---|---|
+| `pipeline_define` | `create` | `name` | 新增一個空的 Pipeline，連同產生出來的 id 一起回傳。不會被設為作用中 |
+| `pipeline_define` | `rename` | `pipeline_id`、`name` | 就地更名；id 與 Stage 都不動 |
+| `pipeline_define` | `delete` | `pipeline_id` | 有破壞性。執行進行中會被拒絕 —— 見下文 |
+| `pipeline_define` | `set_active` | `pipeline_id` | 決定 Pipelines 視窗顯示哪個樣板，也決定 `pipeline_start` 沒帶 `pipeline_id` 時跑哪一個 |
+| `pipeline_define` | `reset_builtin` | `pipeline_id` | 只有 `default` 與 `maintenance` 有種子資料。會把該 Pipeline 的每一個 Stage 換成種子那一組 |
+| `stage_define` | `upsert` | `stage` | 一個完整的 Stage 物件，以 `stage["id"]` 比對：既有的 id 會被合併覆蓋（你沒給的欄位保留原值），新的 id 則附加到最後。Store 要求 `id`（只能是字母、數字、連字號、底線、點）與非空的 `slots`。形狀是 `{id, title, short_title, question, description, sentinel, recommended_roles, allow_questions, doc_query, slots}`，每個 Slot 是 `{agent_key, role_key, label, kickoff_body, is_commander}`。請先從 `pipeline_list` 讀一個出來照著改，不要憑空組 —— 但要注意 `pipeline_list` 刻意不給 `kickoff_body`，所以只靠它組出來的 upsert 會把它改寫到的那些 Slot 的 Kickoff 清空 |
+| `stage_define` | `delete` | `stage_id` | 對一個 Pipeline 的最後一個 Stage 會被拒絕 |
+| `stage_define` | `reorder` | `ids` | 你要的順序下的 Stage id。沒列到的 id 會維持彼此的相對順序排在後面；不認得的 id 與重複的 id 會被忽略。這個順序**就是**執行順序 |
+| `stage_define` | `reset` | — | 有破壞性：`default` 與 `maintenance` 會放回內建的 Stage，而你自己建的 Pipeline 會**什麼都不剩** —— 這樣重置過的自訂 Pipeline 會變成空的、跑不起來。沒有復原，所以如果之後可能還想要它，先用 `pipeline_list` 讀出來留著 |
+| `role_define` | `upsert` | `key`、`label`、`system_prompt` | `key` 是 1–32 個字元的小寫字母、數字、底線或連字號。**它會整個取代這個 Role**：你沒給的 `label` 或 `system_prompt` 會被寫成空的，而空值會被拒絕 —— 這也是唯一擋住「半套 upsert 抹掉一段 Prompt」的東西。`one_line` 是顯示在 Label 旁邊的簡短說明 |
+| `role_define` | `rename` | `key`、`new_key` | 更名並在同一步把每個指名舊 key 的 Stage Slot 一起改指過去，所以不會出現「Slot 指著不存在的 Role」的中間狀態。這裡的 `label`／`one_line`／`system_prompt` 是選填：沒給的會從既有的 Role 沿用。`key` 不存在（`not_found`）或 `new_key` 已經被用掉（`role_key_exists`）都會被拒絕，因為把兩個 Role 併在一起等於無聲丟掉其中一邊的 Prompt |
+| `role_define` | `delete` | `key` | 只要還有 Stage Slot 指名這個 Role 就會被拒絕 —— 見下文 |
+| `role_define` | `reset` | — | 有破壞性：丟掉每一個 Role（自訂的也一樣），放回內建那一組。指著種子組沒有的 Role 的那些 Slot 會被清空，而不是留著懸空的指向，所以 Pipeline 活得下來，但那些 Slot 失去了 Role、必須重新選角。沒有復原 |
+
+**執行進行中還去編輯會怎樣。** 當該 Workspace 有一輪執行處於 `running` 狀態時，
+`pipeline_define` 的 `delete` 與 `set_active` 會直接被拒絕；`reset_builtin` 則是在
+進行中的那一輪正用著該 Pipeline 時被拒絕。`stage_define` 的四個 op **全部**同樣被拒絕
+—— 執行中途被改掉的 Stage 清單，等於在這一輪腳下換了流程。拒絕的形式是 `ok: false` 帶
+`error_code: "pipeline_running"`，而且什麼都沒寫進去。一輪執行是跟它啟動當下記錄的
+Pipeline 比對，所以明寫那個 Pipeline 也繞不過這道守衛；其他 Workspace、或跑著別的
+Pipeline 的執行則不受影響。`workspace_path` 指的是「要檢查哪個專案的執行」——
+它預設是呼叫端 Pane 自己的 Workspace，而一個沒有 Pane 又什麼都不給的呼叫端，等於完全
+沒有守衛。落在兩輪執行之間的編輯會無聲地改變**下一輪**的行為，這正是要提醒使用者的情況。
+
+`role_define` **沒有**執行守衛：Pipeline 在跑的時候照樣可以改 Role。它的 `delete` 守的
+是另一件事 —— 只要還有 Stage Slot 指名這個 Role 就會被拒絕，而且拒絕（`error_code:
+"role_in_use"`）會在 `usages` 裡列出那些 Slot，你可以用 `stage_define` 的 `upsert` 把
+它們改指到別的 Role，或改成更名。指著已刪除 Role 的 Slot 會讓 Role 注入失敗，那個 Stage
+的 Pane 會停在一個空 Prompt 前面，畫面上沒有任何東西說明原因 —— 這道拒絕就是為了這個。
+
+這三個 Tool 還會回的 `error_code` 是 `not_found` 與 `invalid`（Store 拒絕了那個值）。
+任何一種失敗都不會寫入。
+
+### CLI 權限
+
+| Tool | 參數 | 功能 |
+|---|---|---|
+| `cli_permission_settings` | `yolo`、`workspace_path` | 讀取或變更那個「讓 CLI 略過權限詢問」的全域開關。不帶參數呼叫就只是讀；給了 `yolo` 就是設定。回傳視窗自己的 `{ok, result, error}`，`result` 是 `{yolo, agents}`，`agents` 每個 CLI 廠商一筆 —— `{agent, mode, skipFlag}`。`ok` 為 false 帶 `error_code: "ui_no_window"` 代表沒有 Navide 視窗可以問 |
+
+「Yolo」是 Navide 對「Spawn 時傳給 CLI 的權限略過旗標」的稱呼（Claude 的
+`--dangerously-skip-permissions`，以及各廠商的對應旗標）。把它打開，意思是 Navide 起的
+那些 CLI 在編輯檔案、執行 Shell 指令、發網路請求之前不再詢問，改成自己判斷。這是使用者
+自己要做的決定 —— 不要為了讓自己的工作越過一個詢問而去打開它。
+
+**它不是 Pipeline 範圍，也不是 Workspace 範圍。** 它是整個 App **唯一一份**設定，存在
+使用者設定裡，而且每一條啟動 CLI 的路徑都會讀它：手動開的 Pane、Pipeline 的 Slot、
+視窗內建的 CLI 面板、恢復與還原，全都一樣。變更只對**之後**啟動的 CLI 生效 —— 已經在跑
+的行程保留它啟動時帶的旗標，所以關掉它並不會回頭影響一個已經在跑的 Pane。這裡的
+`workspace_path` **純粹是定址用**：它決定要問哪個視窗，不是決定變更套用到哪裡。每個視窗
+給的答案都一樣，透過任何一個視窗寫入也會影響全部，所以它預設是呼叫端 Pane 所在的視窗，
+而一個沒有 Pane 又什麼都不指名的呼叫端，就是拿到當下開著的任何一個視窗。這個設定沒有
+「換一個路徑就能拿到的專案版本」。
+
+**只讀 `yolo` 會誤導你。** 每個廠商有自己的 `mode`，而且它**蓋過**全域開關：`inherit`
+跟著全域走，`force-on` 與 `force-off` 則不理它。所以 `yolo: true` 不代表每一家 CLI 都會
+略過，`yolo: false` 也不代表沒有一家會。單一 CLI 的答案在 `agents[].skipFlag` —— 那是
+該廠商此刻真的會被帶著啟動的旗標，空字串代表不帶。完全沒有略過旗標的廠商（grok、
+opencode、pi）不管開關怎麼設都永遠是空的。
+
+## Resources
+
+三個唯讀 URI。Resource 是 Client 代表使用者去列出與讀取的 —— 把某個 Resource 附進
+對話是「人」的動作，不是 Agent 被說服去做的事 —— 所以這三個一律唯讀，而且每一個都
+是既有 Tool 所服務資料的另一種呈現，不是第二套實作。
+
+| URI | 名稱 | 回傳什麼 |
+|---|---|---|
+| `navide://workspace/plans` | `workspace_plans` | `{workspace_path, plans}` —— 你的 Workspace 底下 `.agent-team/plans/` 的 Plan 文件索引，跟 `plan_list` 回傳的是同一份清單，以 JSON 呈現 |
+| `navide://workspace/plan/{rel_path}` | `workspace_plan` | 單一份 Plan 文件：`{rel_path, meta, html}`，經由 `plan_read` 自己的路徑防護讀取 |
+| `navide://panes` | `panes` | 你可以傳指令過去的 CLI Pane，跟 `cli_list_targets` 回傳的是同一份名冊，以 JSON 呈現 |
+
+Resource 讀取的驗證方式與 Tool 呼叫完全相同：解析的是同一個呼叫端，沒接線的呼叫端
+也以同樣方式被拒絕。兩個 Workspace Resource 取的是呼叫端自己的 Workspace，沒有任何
+參數可以指名別的專案，所以它們是給 Pane 呼叫端用的 —— 外部 Client 沒有 Pane 身分，
+也就沒有可供解析的 Workspace。
+
+**`rel_path` 只吃單一 URI 區段。** SDK 的 Template 參數是用 `[^/]+` 比對的，所以它
+帶不了原始的 `/`：裸檔名可以直接用，完整的 `.agent-team/plans/<file>` 形式則必須
+Percent-encode（`.agent-team%2Fplans%2F<file>`）。這個值會在解析之前先被 decode，而
+這正是那道防護有實質作用、而不只是裝飾的原因 —— `%2E%2E%2F` 到達檔案系統時就是
+`../`，`plan_read` 會拒絕任何離開 plans 子樹的路徑。
+
+## Prompts
+
+三個給**使用者**填的樣板，不是寫給模型看的說明：Client 會把它們呈現給人，通常是
+一個斜線指令，回來的內容會被插進他的訊息裡。所以每一個都渲染成一段填好、送出後
+本身就站得住的指示。
+
+| Prompt | 參數 | 它要求什麼 |
+|---|---|---|
+| `delegate_to_pane` | `target`、`task` | 用 `cli_send` 把 `task` 送給 `target` 這個 CLI Pane，然後停下來等它回覆，而不是自己動手做 —— 位址不在名冊裡就先跑 `cli_list_targets`，並且回頭問使用者指的是哪個 Pane，而不是自己猜一個相近的名字。送出的訊息裡會要求 `target` 做完之後用 `cli_send` 回報 |
+| `start_pipeline` | `task` | 為 `task` 啟動這個 Workspace 的 Pipeline 執行 —— 但要先讀 `pipeline_status` 確認沒有一輪已經在跑、讀 `pipeline_list` 看會開出哪些 Stage，把「即將開出什麼」講給使用者聽（這會消耗 CLI 額度），等他說開始。之後回報這一輪是不是真的啟動了，沒有的話說出視窗給的理由 |
+| `review_plan` | `rel_path` | 先用 `plan_read` 讀 `rel_path` 這份 Plan 文件，然後以審查者的角度走一遍，並對照程式碼查核它做出的宣稱。每一項發現都用 `plan_add_note` 記在文件本身上（一項一則、具體到可以據以行動），而不是只在對話裡講，最後再說這份 Plan 依現況是否可以核准 |
 
 ## Pane 的 id 活得比 Pane 久
 

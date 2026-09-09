@@ -36,12 +36,36 @@ const cliTools: ToolRow[] = [
   { name: 'cli_get_status', what: '查另一個 pane 是否忙碌、最近一次活動' },
   { name: 'cli_wait_idle', what: '等到另一個 pane 閒置或逾時（最長 120 秒）；逾時會說明是卡在權限提示、還在做事、還是連不上' },
   { name: 'cli_interrupt', what: '送出該 CLI 的中斷鍵給本機 pane；這不等於停止，可能只是清空輸入框，結果要自己去確認' },
+  { name: 'cli_close_agent', what: '關掉另一個 pane，補上 cli_open_agent 的另一半；這會終止對方正在做的事且無法復原，先用 cli_get_status 確認它不忙' },
+  { name: 'cli_message_log', what: '自己收送過的訊息歷史；訊息一旦送達就從 inbox_summary 與 pending_incoming 消失，這裡是唯一還查得到的地方' },
+  { name: 'cli_usage', what: '各家 CLI 還剩多少額度；派工前先看，否則訊息會送達到一個已經用完額度的 CLI 手上' },
+  { name: 'cli_token_stats', what: '這個工作區目前的 token 用量' },
+]
+
+const workspaceTools: ToolRow[] = [
+  { name: 'workspace_list', what: '這台機器上已知的工作區，含哪些目前有活著的 pane；要對別的專案動作時用它取得合法路徑' },
+  { name: 'skills_list', what: 'Skill 庫有哪些、哪些投遞給了自己' },
+  { name: 'memory_list', what: '各 CLI 的指示檔（CLAUDE.md、AGENTS.md…）清單與內容；只讀，且只能讀掃描清單裡列出的檔案' },
+  { name: 'pipeline_list', what: '有哪些 pipeline、各自的階段與角色定義' },
+  { name: 'pipeline_status', what: '這個工作區目前的執行狀態，跑到第幾階段' },
+  { name: 'pipeline_start', what: '啟動一次 pipeline 執行；這會依階段開出多個 CLI pane 並消耗額度' },
+  { name: 'pipeline_next', what: '推進到下一階段；已在最後一階段時會拒絕，而不是把 run 收掉' },
+  { name: 'pipeline_resume', what: '接續一個中斷的 run' },
+  { name: 'pipeline_abort', what: '中止進行中的執行' },
+  { name: 'pipeline_reset', what: '清掉目前 run 的進度並拆除該視窗的所有 pane（含手動開的）；無法復原' },
+  { name: 'pipeline_restart', what: '砍掉現有 pipeline pane 後從頭再跑一次同一個任務；無法復原' },
+  { name: 'pipeline_define', what: '建立／改名／刪除 pipeline、設為使用中、重設內建；run 進行中時 delete 與 set_active 會被拒絕' },
+  { name: 'stage_define', what: '階段的新增修改／刪除／重新排序／重設；run 正在用那個 pipeline 時四個操作都會被拒絕' },
+  { name: 'role_define', what: '角色的新增修改／改名／刪除／重設；改名會連帶改寫所有引用它的 slot，仍被引用的角色不給刪' },
+  { name: 'cli_permission_settings', what: '讀寫 CLI 權限略過旗標（yolo）。這是全域設定，不是 pipeline 專屬，只影響之後開的 pane；某家 CLI 實際會不會帶旗標要看回傳的 agents[].skipFlag，不是只看全域值' },
+  { name: 'preview_clear', what: '清空預覽面板的變更記錄軌；刪掉的是你在畫面上看到的那些行，含檔案監看與你自己的操作，無法復原' },
 ]
 
 const uiTools: ToolRow[] = [
   { name: 'ui_list_actions', what: '列出目標視窗目前註冊的所有動作 id' },
   { name: 'ui_invoke', what: '呼叫一個註冊動作（例如開新 pane、切分頁、開設定）' },
   { name: 'ui_snapshot', what: '取得目標視窗目前的 UI 狀態快照（pane、分頁、焦點…）' },
+  { name: 'ui_diagnostics', what: '讀取該視窗記錄的 UI 動作診斷；工具回報成功但視窗內行為不對時，用它查真正發生什麼' },
 ]
 
 const comparison: CompareRow[] = [
@@ -130,6 +154,23 @@ const comparison: CompareRow[] = [
       <p class="mh-note">
         計畫是 agent 用這些工具寫出來的 HTML，你在 Navide 的計畫視窗閱讀與核准。
         agent 只有在階段推進到「已核准」之後才會開始寫程式。
+      </p>
+
+      <h3 class="mh-h3">工作區、Pipeline 編排與設定</h3>
+      <div class="mh-tablewrap">
+        <table class="mh-table">
+          <tbody>
+            <tr v-for="t in workspaceTools" :key="t.name">
+              <td class="mh-tool"><code>{{ t.name }}</code></td>
+              <td>{{ t.what }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mh-note">
+        這幾個是 agent 用自己的工具做不到的事——額度、pipeline 狀態、skill 投遞對象都只有
+        Navide 知道。Git、檔案讀寫、shell 刻意<strong>沒有</strong>包成 MCP 工具：agent 本來就有
+        這些能力，包一層只會更難用，還要每個 pane 都付工具清單的 context 成本。
       </p>
 
       <h3 class="mh-h3">與其他 CLI 協作</h3>
