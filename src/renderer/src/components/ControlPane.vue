@@ -1421,6 +1421,25 @@ function isPipelineRunning(pipelineId: string): boolean {
   return pipelineId === (props.activePipelineId ?? '') && props.pipeline.state === 'running'
 }
 
+// The unfinished run recorded in project.json belongs to exactly ONE pipeline.
+// Offering "Resume" while a DIFFERENT pipeline is active let the user resume
+// stage N of pipeline A against pipeline B's (possibly shorter) stage list.
+// A record with no pipelineId predates per-pipeline projects and stays
+// resumable, so old workspaces keep the banner they have always had.
+const resumeMatchesActivePipeline = computed<boolean>(() => {
+  const owner = props.existingProject?.pipelineId ?? ''
+  if (!owner) return true
+  return owner === (props.activePipelineId ?? '')
+})
+
+// Name of the pipeline the unfinished run belongs to, for the card shown when
+// it is not the active one. Falls back to the raw id: the pipeline may have
+// been deleted, and the id is still more use than an empty string.
+const resumeOwnerPipelineName = computed<string>(() => {
+  const owner = props.existingProject?.pipelineId ?? ''
+  return props.pipelines?.find((p) => p.id === owner)?.name ?? owner
+})
+
 // ── Pipeline list pagination ───────────────────────────────────────────────
 const PIPELINE_PAGE_SIZE = 5
 const pipelinePage = ref(0)
@@ -2465,7 +2484,21 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         <button class="ghost pg-btn" :disabled="pipelinePage >= pipelinePageCount - 1" @click="pipelinePage++">›</button>
       </div>
       <!-- ── Resume card (workspace re-opened with unfinished pipeline) ── -->
-      <template v-if="pipeline.state !== 'running' && existingProject && existingProject.state !== 'idle' && existingProject.nextStageIndex >= 0">
+      <template v-if="pipeline.state !== 'running' && existingProject && existingProject.state !== 'idle' && existingProject.nextStageIndex >= 0 && !resumeMatchesActivePipeline">
+        <div class="pipeline-running-divider"></div>
+        <!-- Resume is gated on the run's own pipeline being active, but hiding
+             the card entirely left an unfinished run invisible. Say so, and let
+             the button take the switch-then-resume path. -->
+        <div class="resume-mismatch-card">
+          <p class="resume-mismatch-text">
+            {{ $t('label.resume-other-pipeline', { name: resumeOwnerPipelineName }) }}
+          </p>
+          <button class="ghost wide" @click="emit('pipeline-resume')">
+            {{ $t('action.switch-and-resume') }}
+          </button>
+        </div>
+      </template>
+      <template v-if="pipeline.state !== 'running' && existingProject && existingProject.state !== 'idle' && existingProject.nextStageIndex >= 0 && resumeMatchesActivePipeline">
         <div class="pipeline-running-divider"></div>
         <div class="resume-card">
           <div class="resume-head">
@@ -3142,7 +3175,25 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
             existingProject &&
             pipeline.state !== 'running' &&
             existingProject.state !== 'idle' &&
-            existingProject.nextStageIndex >= 0
+            existingProject.nextStageIndex >= 0 &&
+            !resumeMatchesActivePipeline
+          "
+          class="resume-mismatch-card"
+        >
+          <p class="resume-mismatch-text">
+            {{ $t('label.resume-other-pipeline', { name: resumeOwnerPipelineName }) }}
+          </p>
+          <button class="ghost wide" @click="emit('pipeline-resume')">
+            {{ $t('action.switch-and-resume') }}
+          </button>
+        </div>
+        <div
+          v-if="
+            existingProject &&
+            pipeline.state !== 'running' &&
+            existingProject.state !== 'idle' &&
+            existingProject.nextStageIndex >= 0 &&
+            resumeMatchesActivePipeline
           "
           class="resume-card"
         >
@@ -3261,7 +3312,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           </div>
         </div>
         <p v-if="pipeline.state === 'completed'" class="hint ok">
-          {{ $t('label.pipeline-completed') }}
+          {{ $t('label.pipeline-completed', { count: pipeline.totalStages || stages.length }) }}
         </p>
         <p v-else-if="pipeline.state === 'aborted'" class="hint warn">
           {{ $t('label.pipeline-aborted-paused') }}
@@ -4048,6 +4099,22 @@ button.icon-btn.muted:hover {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.resume-mismatch-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-muted);
+  border-left: 3px solid var(--attention-fg);
+  border-radius: var(--radius-xs);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.resume-mismatch-text {
+  color: var(--text-secondary);
+  font-size: var(--font-2xs);
+  margin: 0;
 }
 .resume-card.done {
   border-left-color: var(--success-fg);

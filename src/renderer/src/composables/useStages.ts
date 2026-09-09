@@ -9,7 +9,11 @@ import { stageDefToFrontend, type Stage } from '../data/stages'
  */
 export function useStages(
   backend: ReturnType<typeof useBackend>,
-  getActivePipelineId?: () => string
+  getActivePipelineId?: () => string,
+  /** Called with the stages an accepted `stages.changed` carried, plus its
+   *  `reason`. A consumer holding an open draft needs the reason to tell a
+   *  role repoint (`role_rename`) from an ordinary edit. */
+  onChanged?: (stages: Stage[], reason: string) => void
 ) {
   const stages = ref<Stage[]>([])
   const stagesPath = shallowRef<string>('')
@@ -47,13 +51,19 @@ export function useStages(
   // Subscribe to backend broadcasts. Only apply if the changed pipeline matches
   // the currently active pipeline (ignore edits to other pipelines).
   unsubChanged = backend.on('stages.changed', (raw) => {
-    const payload = raw as { stages: Record<string, unknown>[]; pipeline_id?: string }
+    const payload = raw as {
+      stages: Record<string, unknown>[]
+      pipeline_id?: string
+      reason?: string
+    }
     if (!payload?.stages) return
     const activePid = getActivePipelineId?.() ?? ''
     const changedPid = payload.pipeline_id ?? ''
     // Accept if no filter, or if changed pipeline matches active
     if (!changedPid || !activePid || changedPid === activePid) {
-      stages.value = payload.stages.map(stageDefToFrontend)
+      const next = payload.stages.map(stageDefToFrontend)
+      stages.value = next
+      onChanged?.(next, payload.reason ?? '')
     }
   })
 

@@ -408,3 +408,59 @@ export function turnEndsWithSentinel(text: string, sentinel: string): boolean {
   }
   return false
 }
+
+/** Record a live turn_complete for a pane, ignoring stale REPLAYS.
+ *
+ *  The map this writes is the shared "when did this pane last finish a turn"
+ *  clock read by delivery gating, the done notification, the unattended loop
+ *  and the pipeline's stage verdict. Stamping it with the LOCAL receive time
+ *  for every event means a backend restart — which re-parses each CLI log and
+ *  re-emits its historical turn ends — makes every pane look like it finished
+ *  just now. For a running pipeline stage that is enough to satisfy
+ *  turnCompleteDone for every slot at once and chain-advance the run while the
+ *  agents are still working.
+ *
+ *  The stamp stays `now` (not the event's own timestamp) so every consumer's
+ *  existing wall-clock comparisons are unchanged; only the decision to record
+ *  at all is new. Returns whether the map was written. */
+export function recordTurnComplete(
+  map: Map<string, number>,
+  paneId: string,
+  timestamp: string,
+  now: number,
+  toleranceMs: number,
+): boolean {
+  if (isReplayedTurnComplete(timestamp, now, toleranceMs)) return false
+  map.set(paneId, now)
+  return true
+}
+
+/** Which pane keys a pipeline-wide reset may drop from the shared turn-signal
+ *  maps (armedAt / turnCompleteAt / lastActiveAt / lastWorkingAt).
+ *
+ *  These maps are keyed by pane and shared by four consumers: the pipeline's
+ *  stage verdict, the done notification, cross-pane delivery gating, and the
+ *  unattended loop. Clearing them WHOLESALE on a pipeline abort/reset therefore
+ *  reached panes the pipeline never touched: a manual pane running /loop had its
+ *  turnCompleteAt zeroed, and loopContinueReady (which needs
+ *  turnCompleteAt > armedAt) then stayed false until the CLI produced a
+ *  brand-new turn end — which an idle CLI never does. The loop parked forever
+ *  with no log and no notification.
+ *
+ *  Two kinds of key are still dropped, which is the whole hygiene the reset
+ *  wanted: those belonging to the pipeline's own panes, and those belonging to
+ *  panes that no longer exist (so the maps cannot grow across runs). Keeping a
+ *  live non-pipeline pane's keys is safe for the pipeline: every pipeline path
+ *  compares against the arm time a new run records, so a stale signal from a
+ *  previous run can never read as a finish. */
+export function paneSignalResetKeys(
+  keys: Iterable<string>,
+  pipelinePaneIds: ReadonlySet<string>,
+  livePaneIds: ReadonlySet<string>,
+): string[] {
+  const drop: string[] = []
+  for (const key of keys) {
+    if (pipelinePaneIds.has(key) || !livePaneIds.has(key)) drop.push(key)
+  }
+  return drop
+}

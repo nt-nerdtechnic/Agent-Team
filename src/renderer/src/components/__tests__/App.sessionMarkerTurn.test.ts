@@ -55,8 +55,19 @@ describe('session-marker gate wiring', () => {
     const body = activityHandler()
     // The pane genuinely went idle, so the badge and the turn timestamp must
     // stay truthful — only the user-facing effects are dropped.
-    expect(body).toContain('paneTurnCompleteAt.set(ev.pane_id, Date.now())')
+    expect(body).toContain('recordTurnComplete(paneTurnCompleteAt, ev.pane_id')
     expect(body).toContain('markTurnComplete?.()')
-    expect(body).not.toContain('if (!markerReply) paneTurnCompleteAt')
+    // Not "appears somewhere in a 360-line handler": the enclosing conditions
+    // are what this owns. Everything between the turn_complete branch and the
+    // call has to be the superseded check and nothing else — a marker guard
+    // spelled `if (!markerReply && !ev.superseded)` satisfied every loose form
+    // of this assertion while doing the exact thing it forbids.
+    const turnComplete = body.slice(body.indexOf("if (ev.event_type === 'turn_complete') {"))
+    const upToRecord = turnComplete.slice(0, turnComplete.indexOf('recordTurnComplete(paneTurnCompleteAt'))
+    expect(upToRecord, 'a marker guard on the turn timestamp').not.toContain('markerReply')
+    expect(upToRecord.trimEnd().endsWith('if (!ev.superseded) {')).toBe(true)
+    // The badge reset is unguarded entirely — the pane really did go idle.
+    const upToBadge = turnComplete.slice(0, turnComplete.indexOf('markTurnComplete?.()'))
+    expect(upToBadge.slice(upToBadge.lastIndexOf('\n'))).not.toContain('markerReply')
   })
 })

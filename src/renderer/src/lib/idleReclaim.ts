@@ -41,6 +41,12 @@ export interface ReclaimCandidate {
   /** The manager pipeline is scraping this pane's buffer for its next
    *  dispatch. It sits idle and unfocused for as long as its workers take. */
   managerRouting: boolean
+  /** The pipeline's cross-stage ("global") Manager router is live and this is
+   *  the Manager pane it reads. Separate from managerRouting: the global
+   *  Manager lives in ONE stage and the per-stage router that owned it is
+   *  disposed the moment that stage ends, while the global router keeps reading
+   *  it for the whole run. */
+  globalManagerRouting: boolean
   /** A stage watcher is polling this pane for its completion sentinel. */
   stageWatched: boolean
   /** Undelivered cross-pane messages are queued for it. */
@@ -60,6 +66,7 @@ export type ReclaimBlock =
   | 'spawn-report-pending'
   | 'no-ref'
   | 'manager-routing'
+  | 'global-manager-routing'
   | 'stage-watched'
   | 'has-queued-messages'
   | 'not-idle'
@@ -103,6 +110,15 @@ export function reclaimBlockedBy(
   // The manager reads this pane's buffer to route the next dispatch. Its ref
   // goes with the reclaim, so the router silently reads '' forever after.
   if (pane.managerRouting) return 'manager-routing'
+  // The cross-stage Manager. managerRouting cannot see it: the global Manager
+  // sits in stage 01 and that stage's router is disposed when the stage ends,
+  // and in manager mode it has no watcher either — so from stage 02 on it was
+  // reclaimable while still being the pane every worker's ASK/REPORT is routed
+  // through. Reclaiming it made globalManagerPaneId() return null (it requires
+  // `realized`) and globalManagerRouterScan() bail on its first line, with no
+  // log. Tied to the router actually being live, so a completed or aborted run
+  // releases the pane instead of blocking it forever.
+  if (pane.globalManagerRouting) return 'global-manager-routing'
   // A stage watcher polls this pane for its completion sentinel, and nothing
   // rebuilds one: realize skips role injection, which is where watchers start.
   // The stage would wait on a slot that can no longer report.

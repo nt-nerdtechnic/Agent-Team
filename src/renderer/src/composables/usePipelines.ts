@@ -92,10 +92,16 @@ export function usePipelines(backend: ReturnType<typeof useBackend>) {
         'pipelines.create',
         { name }
       )
-      if (!resp.ok || !resp.payload) return null
+      if (!resp.ok || !resp.payload) {
+        error.value = resp.error?.message ?? 'create failed'
+        return null
+      }
       pipelines.value = resp.payload.pipelines
       return resp.payload.pipeline
-    } catch { return null }
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : 'create failed'
+      return null
+    }
   }
 
   async function renamePipeline(pipelineId: string, name: string): Promise<boolean> {
@@ -104,10 +110,16 @@ export function usePipelines(backend: ReturnType<typeof useBackend>) {
         'pipelines.rename',
         { pipeline_id: pipelineId, name }
       )
-      if (!resp.ok || !resp.payload) return false
+      if (!resp.ok || !resp.payload) {
+        error.value = resp.error?.message ?? 'rename failed'
+        return false
+      }
       pipelines.value = resp.payload.pipelines
       return true
-    } catch { return false }
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : 'rename failed'
+      return false
+    }
   }
 
   async function deletePipeline(
@@ -119,10 +131,16 @@ export function usePipelines(backend: ReturnType<typeof useBackend>) {
         pipeline_id: pipelineId,
         workspace_path: workspacePath ?? '',
       })
-      if (!resp.ok || !resp.payload) return false
+      if (!resp.ok || !resp.payload) {
+        error.value = resp.error?.message ?? 'delete failed'
+        return false
+      }
       pipelines.value = resp.payload.pipelines
       return true
-    } catch { return false }
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : 'delete failed'
+      return false
+    }
   }
 
   async function setActivePipeline(
@@ -137,23 +155,38 @@ export function usePipelines(backend: ReturnType<typeof useBackend>) {
         pipeline_id: pipelineId,
         workspace_path: workspacePath ?? '',
       })
-      if (!resp.ok || !resp.payload) return false
+      if (!resp.ok || !resp.payload) {
+        error.value = resp.error?.message ?? 'set active failed'
+        return false
+      }
       activePipelineId.value = resp.payload.active_pipeline_id
       pipelines.value = resp.payload.pipelines
       return true
-    } catch { return false }
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : 'set active failed'
+      return false
+    }
   }
 
-  async function resetBuiltin(pipelineId: string): Promise<boolean> {
+  async function resetBuiltin(
+    pipelineId: string,
+    workspacePath?: string
+  ): Promise<boolean> {
     try {
       const resp = await backend.send<{ pipeline: PipelineSummary; pipelines: PipelineSummary[] }>(
         'pipelines.reset_builtin',
-        { pipeline_id: pipelineId }
+        { pipeline_id: pipelineId, workspace_path: workspacePath ?? '' }
       )
-      if (!resp.ok || !resp.payload) return false
+      if (!resp.ok || !resp.payload) {
+        error.value = resp.error?.message ?? 'reset failed'
+        return false
+      }
       pipelines.value = resp.payload.pipelines
       return true
-    } catch { return false }
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : 'reset failed'
+      return false
+    }
   }
 
   return {

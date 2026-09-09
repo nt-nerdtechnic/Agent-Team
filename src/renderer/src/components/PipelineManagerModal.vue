@@ -4,11 +4,12 @@
 // window — the backend connection, theme and notification host belong to the
 // host app, so this component only owns the pipeline/stage/role UI.
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { useBackend } from '../composables/useBackend'
 import type { TerminalDockPort } from '@navide/terminal'
 import { useNotify } from '@navide/plugin-ui/foundation'
 import { AiCliDock } from '@navide/plugin-shell'
-import type { useRoles, Role } from '../composables/useRoles'
+import type { useRoles, Role, RoleUsage } from '../composables/useRoles'
 import type { usePipelines, PipelineSummary } from '../composables/usePipelines'
 import { useStages } from '../composables/useStages'
 import { stageToBackend, type AgentKey, type Stage, type StageSlot } from '../data/stages'
@@ -36,6 +37,7 @@ const emit = defineEmits<{
 const { backend, rolesApi, pipelinesApi } = props
 
 const notify = useNotify()
+const { t } = useI18n()
 
 const activeTab = ref<'pipelines' | 'roles'>('pipelines')
 
@@ -79,7 +81,11 @@ const plRenameText = ref('')
 // Stage cache scoped to the pipeline being edited: getActivePipelineId feeds
 // both refresh() and the stages.changed broadcast filter, so external edits to
 // OTHER pipelines never clobber the list shown here.
-const stagesApi = useStages(backend, () => plEditingId.value)
+const stagesApi = useStages(
+  backend,
+  () => plEditingId.value,
+  (stages, reason) => { if (reason === 'role_rename') sAdoptRepointedRoleKeys(stages) }
+)
 const sActiveStages = computed(() => stagesApi.stages.value)
 const sSelectedId = ref<string | null>(null)
 const sDraft = ref<Stage | null>(null)
@@ -118,13 +124,21 @@ function plBackToList(): void {
   sIsNew.value = false
 }
 
+/** Pipeline mutations resolve to null/false and leave the reason in
+ *  pipelinesApi.error — the backend's running-project veto arrives that way, so
+ *  fold it into the toast instead of showing a bare "failed". */
+function plFail(key: string): string {
+  const reason = pipelinesApi.error.value
+  return reason ? `${t(key)} — ${reason}` : t(key)
+}
+
 async function plCreate(): Promise<void> {
   if (!plNewName.value.trim() || plBusy.value) return
   plBusy.value = true
   try {
     const p = await pipelinesApi.createPipeline(plNewName.value.trim())
-    if (p) { plNewName.value = ''; plCreating.value = false; plSummary.value = `Created "${p.name}"` }
-    else notify.toast('Create failed', { type: 'error' })
+    if (p) { plNewName.value = ''; plCreating.value = false; plSummary.value = t('label.created-name', { name: p.name }) }
+    else notify.toast(plFail('error.create-failed'), { type: 'error' })
   } finally {
     plBusy.value = false
   }
@@ -134,9 +148,9 @@ async function plSetActive(id: string): Promise<void> {
   if (plBusy.value) return
   plBusy.value = true
   try {
-    const ok = await pipelinesApi.setActivePipeline(id)
-    if (ok) plSummary.value = 'Default pipeline updated'
-    else notify.toast('Set default failed', { type: 'error' })
+    const ok = await pipelinesApi.setActivePipeline(id, props.workspacePath)
+    if (ok) plSummary.value = t('label.default-pipeline-updated')
+    else notify.toast(plFail('error.set-default-failed'), { type: 'error' })
   } finally {
     plBusy.value = false
   }
@@ -153,10 +167,10 @@ async function plConfirmRename(): Promise<void> {
   try {
     const ok = await pipelinesApi.renamePipeline(plRenamingId.value, plRenameText.value.trim())
     if (ok) {
-      plSummary.value = 'Renamed'
+      plSummary.value = t('label.renamed')
       plRenamingId.value = ''
     } else {
-      notify.toast('Rename failed', { type: 'error' })
+      notify.toast(plFail('error.rename-failed'), { type: 'error' })
     }
   } finally {
     plBusy.value = false
@@ -164,15 +178,15 @@ async function plConfirmRename(): Promise<void> {
 }
 
 async function plDelete(id: string, name: string): Promise<void> {
-  if (!(await notify.confirm(`Delete "${name}"? This cannot be undone.`, { title: 'Delete Pipeline', confirmText: 'Delete' }))) return
+  if (!(await notify.confirm(t('hint.delete-pipeline-confirm', { name }), { title: t('label.delete-pipeline-title'), confirmText: t('action.delete') }))) return
   plBusy.value = true
   try {
-    const ok = await pipelinesApi.deletePipeline(id)
+    const ok = await pipelinesApi.deletePipeline(id, props.workspacePath)
     if (ok) {
-      plSummary.value = `Deleted "${name}"`
+      plSummary.value = t('label.deleted-name', { name })
       plBackToList()
     } else {
-      notify.toast('Delete failed', { type: 'error' })
+      notify.toast(plFail('error.delete-failed'), { type: 'error' })
     }
   } finally {
     plBusy.value = false
@@ -180,16 +194,18 @@ async function plDelete(id: string, name: string): Promise<void> {
 }
 
 async function plResetBuiltin(p: PipelineSummary): Promise<void> {
-  if (!(await notify.confirm(`Reset "${p.name}" to its factory stages? This cannot be undone.`, { title: 'Reset Pipeline', confirmText: 'Reset' }))) return
+  if (!(await notify.confirm(t('hint.reset-pipeline-confirm', { name: p.name }), { title: t('label.reset-pipeline-title'), confirmText: t('action.reset') }))) return
   plBusy.value = true
   try {
-    const ok = await pipelinesApi.resetBuiltin(p.id)
+    const ok = await pipelinesApi.resetBuiltin(p.id, props.workspacePath)
     if (ok) {
-      plSummary.value = `Reset "${p.name}"`
+      plSummary.value = t('label.reset-name', { name: p.name })
       if (plView.value === 'detail' && plEditingId.value === p.id) {
         await stagesApi.refresh(p.id)
         sSelectStage(sActiveStages.value[0]?.id ?? null)
       }
+    } else {
+      notify.toast(plFail('error.reset-failed'), { type: 'error' })
     }
   } finally {
     plBusy.value = false
@@ -271,6 +287,20 @@ watch(() => stagesApi.stages.value, (ss) => {
   else if (sSelectedId.value && !ss.find((s) => s.id === sSelectedId.value)) sSelectStage(ss[0]?.id ?? null)
 }, { deep: false })
 
+/** A roles.rename repoints the persisted slots and broadcasts `role_rename`.
+ *  The open draft still holds the deep copy taken before it, so saving would
+ *  write the vanished key back — exactly the dangling `role_key` the rename
+ *  exists to prevent. Take the repointed keys and nothing else, so the fields
+ *  the user is editing survive. Slot counts only differ when a slot edit
+ *  failed to save, and index-matching would be guesswork then, so skip it. */
+function sAdoptRepointedRoleKeys(stages: Stage[]): void {
+  const draft = sDraft.value
+  if (!draft || sIsNew.value || !draft.slots) return
+  const fresh = stages.find((s) => s.id === draft.id)
+  if (!fresh || fresh.slots.length !== draft.slots.length) return
+  draft.slots.forEach((slot, i) => { slot.roleKey = fresh.slots[i].roleKey })
+}
+
 function sSelectStage(id: string | null): void {
   sSelectedId.value = id; sError.value = ''; sAddingSlot.value = false; sEditingSlotIndex.value = null
   if (!id) { sDraft.value = null; return }
@@ -291,46 +321,48 @@ async function sSave(): Promise<void> {
   try {
     const payload = stageToBackend({ ...sDraft.value, id: sDraft.value.id.trim() })
     const resp = await backend.send<{ stage: Record<string, unknown> }>(
-      'stages.upsert', { stage: payload, pipeline_id: plEditingId.value }
+      'stages.upsert',
+      { stage: payload, pipeline_id: plEditingId.value, workspace_path: props.workspacePath }
     )
-    if (!resp.ok) { sError.value = resp.error?.message ?? 'Save failed'; return }
-    sSummary.value = `Saved "${sDraft.value.title}"`
+    if (!resp.ok) { sError.value = resp.error?.message ?? t('error.save-failed'); return }
+    sSummary.value = t('label.saved-name', { name: sDraft.value.title })
     sSelectedId.value = sDraft.value.id.trim()
     sIsNew.value = false
     await stagesApi.refresh(plEditingId.value)
   } catch (err) {
-    sError.value = err instanceof Error ? err.message : 'Save failed'
+    sError.value = err instanceof Error ? err.message : t('error.save-failed')
   } finally { sSaving.value = false }
 }
 async function sDoDelete(): Promise<void> {
   if (!sDraft.value || sIsNew.value) { sConfirmDelete.value = false; return }
   try {
     const resp = await backend.send<{ stages: unknown[] }>(
-      'stages.delete', { id: sDraft.value.id, pipeline_id: plEditingId.value }
+      'stages.delete',
+      { id: sDraft.value.id, pipeline_id: plEditingId.value, workspace_path: props.workspacePath }
     )
     sConfirmDelete.value = false
-    if (!resp.ok) { sError.value = resp.error?.message ?? 'Delete failed'; return }
-    sSummary.value = `Deleted "${sDraft.value.id}"`
+    if (!resp.ok) { sError.value = resp.error?.message ?? t('error.delete-failed'); return }
+    sSummary.value = t('label.deleted-name', { name: sDraft.value.id })
     await stagesApi.refresh(plEditingId.value)
     sSelectStage(sActiveStages.value[0]?.id ?? null)
   } catch (err) {
     sConfirmDelete.value = false
-    sError.value = err instanceof Error ? err.message : 'Delete failed'
+    sError.value = err instanceof Error ? err.message : t('error.delete-failed')
   }
 }
 async function sDoReset(): Promise<void> {
   try {
     const resp = await backend.send<{ stages: unknown[] }>(
-      'stages.reset', { pipeline_id: plEditingId.value }
+      'stages.reset', { pipeline_id: plEditingId.value, workspace_path: props.workspacePath }
     )
     sConfirmReset.value = false
-    if (!resp.ok) { sError.value = resp.error?.message ?? 'Reset failed'; return }
-    sSummary.value = 'Reset to factory defaults'
+    if (!resp.ok) { sError.value = resp.error?.message ?? t('error.reset-failed'); return }
+    sSummary.value = t('label.reset-to-factory-defaults')
     await stagesApi.refresh(plEditingId.value)
     sSelectStage(sActiveStages.value[0]?.id ?? null)
   } catch (err) {
     sConfirmReset.value = false
-    sError.value = err instanceof Error ? err.message : 'Reset failed'
+    sError.value = err instanceof Error ? err.message : t('error.reset-failed')
   }
 }
 async function sMoveUp(index: number): Promise<void> {
@@ -338,7 +370,11 @@ async function sMoveUp(index: number): Promise<void> {
   const ids = sActiveStages.value.map((s) => s.id)
   ;[ids[index - 1], ids[index]] = [ids[index], ids[index - 1]]
   try {
-    await backend.send('stages.reorder', { ids, pipeline_id: plEditingId.value })
+    const resp = await backend.send(
+      'stages.reorder',
+      { ids, pipeline_id: plEditingId.value, workspace_path: props.workspacePath }
+    )
+    if (!resp.ok) { sError.value = resp.error?.message ?? t('error.save-failed'); return }
     await stagesApi.refresh(plEditingId.value)
   } catch { /* ignore transient WS errors for reorder */ }
 }
@@ -347,7 +383,11 @@ async function sMoveDown(index: number): Promise<void> {
   const ids = sActiveStages.value.map((s) => s.id)
   ;[ids[index], ids[index + 1]] = [ids[index + 1], ids[index]]
   try {
-    await backend.send('stages.reorder', { ids, pipeline_id: plEditingId.value })
+    const resp = await backend.send(
+      'stages.reorder',
+      { ids, pipeline_id: plEditingId.value, workspace_path: props.workspacePath }
+    )
+    if (!resp.ok) { sError.value = resp.error?.message ?? t('error.save-failed'); return }
     await stagesApi.refresh(plEditingId.value)
   } catch { /* ignore transient WS errors for reorder */ }
 }
@@ -390,28 +430,37 @@ async function sExport(): Promise<void> {
   // Export the snake_case backend shape so a round-trip import (raw dicts fed
   // back to stages.upsert) preserves short_title / slots[].agent_key etc.
   const envelope = { format_version: 1, exported_at: new Date().toISOString(), stages: sActiveStages.value.map(stageToBackend) }
-  const result = await window.agentTeam.saveJson({ title: 'Export stages', defaultName: `agent-team-stages-${stamp}.json`, content: JSON.stringify(envelope, null, 2) })
-  if (result.ok) sSummary.value = `Exported ${envelope.stages.length} stage(s)`
+  const result = await window.agentTeam.saveJson({ title: t('label.export-stages-title'), defaultName: `agent-team-stages-${stamp}.json`, content: JSON.stringify(envelope, null, 2) })
+  if (result.ok) sSummary.value = t('label.exported-stages', { count: envelope.stages.length })
   sExportBusy.value = false
 }
 async function sImport(): Promise<void> {
   if (!window.agentTeam?.openJson) return
-  sImporting.value = true
-  const result = await window.agentTeam.openJson({ title: 'Import stages JSON' })
+  sImporting.value = true; sError.value = ''
+  const result = await window.agentTeam.openJson({ title: t('label.import-stages-title') })
   if (result.ok && result.content) {
     try {
       const parsed = JSON.parse(result.content)
       const raw: unknown[] = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.stages) ? parsed.stages : [])
       let ok = 0, failed = 0
+      let firstFailure = ''
       for (const entry of raw) {
         const s = entry as Record<string, unknown>
         if (!s.id) { failed++; continue }
-        const resp = await backend.send('stages.upsert', { stage: s, pipeline_id: plEditingId.value })
-        if (resp.ok) ok++; else failed++
+        const resp = await backend.send(
+          'stages.upsert',
+          { stage: s, pipeline_id: plEditingId.value, workspace_path: props.workspacePath }
+        )
+        if (resp.ok) ok++
+        else {
+          failed++
+          if (!firstFailure) firstFailure = resp.error?.message ?? ''
+        }
       }
-      sSummary.value = `Imported ${ok} stage(s)` + (failed ? ` · ${failed} failed` : '')
+      if (firstFailure) sError.value = firstFailure
+      sSummary.value = t('label.imported-stages', { count: ok }) + (failed ? t('label.import-failed-count', { count: failed }) : '')
       await stagesApi.refresh(plEditingId.value)
-    } catch (err) { sError.value = `Invalid JSON: ${(err as Error).message}` }
+    } catch (err) { sError.value = t('error.invalid-json', { message: (err as Error).message }) }
   }
   sImporting.value = false
 }
@@ -429,6 +478,10 @@ const rSelectedKey = ref<string | null>(null)
 const rDraft = ref<DraftRole | null>(null)
 const rSaving = ref(false)
 const rError = ref('')
+// Stage slots a ROLE_IN_USE rejection blamed. Held beside rError and cleared
+// with it: the backend sentence only gives a count, so without these the user
+// is told "no" with nowhere to go.
+const rErrorUsages = ref<RoleUsage[]>([])
 const rConfirmDelete = ref(false)
 const rConfirmReset = ref(false)
 const rSummary = ref('')
@@ -452,13 +505,13 @@ function rFromRole(r: Role, isNew: boolean): DraftRole {
   return { key: r.key, label: r.label, one_line: r.one_line, system_prompt: r.system_prompt, isNew, originalKey: isNew ? '' : r.key }
 }
 function rSelectKey(key: string | null): void {
-  rSelectedKey.value = key; rError.value = ''
+  rSelectedKey.value = key; rError.value = ''; rErrorUsages.value = []
   if (!key) { rDraft.value = null; return }
   const r = rolesApi.find(key)
   if (r) rDraft.value = rFromRole(r, false)
 }
 function rStartNew(): void {
-  rSelectedKey.value = null; rError.value = ''
+  rSelectedKey.value = null; rError.value = ''; rErrorUsages.value = []
   rDraft.value = { key: '', label: '', one_line: '', system_prompt: '# Role: \nYou are a...\n\n# Guidelines:\n1. ...\n\n# Output Format:\n...', isNew: true, originalKey: '' }
 }
 
@@ -469,38 +522,81 @@ const rIsDirty = computed(() => {
   if (!r) return true
   return r.label !== rDraft.value.label || r.one_line !== rDraft.value.one_line || r.system_prompt !== rDraft.value.system_prompt || r.key !== rDraft.value.key
 })
+/** True when the drafted key belongs to a DIFFERENT role than the one being
+ *  edited — the state that both disables Save and fails roles.rename. */
+const rKeyTaken = computed(() => {
+  if (!rDraft.value) return false
+  const target = rDraft.value.key.trim()
+  if (!target) return false
+  const existing = rolesApi.find(target)
+  return !!existing && existing.key !== rDraft.value.originalKey
+})
+
 const rCanSave = computed(() => {
   if (!rDraft.value) return false
   if (!rDraft.value.key.trim() || !rDraft.value.label.trim() || !rDraft.value.system_prompt.trim()) return false
-  // Block if the target key is already taken by a DIFFERENT role (covers both new and rename).
-  const existing = rolesApi.find(rDraft.value.key.trim())
-  if (existing && existing.key !== rDraft.value.originalKey) return false
+  // Block if the target key is already taken by a DIFFERENT role (covers both
+  // new and rename); rKeyTaken drives the explanation shown beside the field.
+  if (rKeyTaken.value) return false
   return rIsDirty.value
 })
 
+/** ROLE_KEY_EXISTS is the one rejection with an actionable escape route: the
+ *  leftover key is unused by any slot, so deleting it is allowed even though
+ *  deleting the original is not. ROLE_NOT_FOUND means the role being renamed is
+ *  gone (another window deleted it); the roles.changed broadcast has already
+ *  refreshed the list, so say that rather than echoing the backend's English.
+ *  Every other code just reports itself. */
+function rRenameErrorMessage(
+  code: string,
+  message: string,
+  newKey: string,
+  oldKey: string
+): string {
+  if (code === 'ROLE_KEY_EXISTS') return t('hint.role-key-exists-recover', { key: newKey })
+  if (code === 'ROLE_NOT_FOUND') return t('hint.role-not-found-refresh', { key: oldKey })
+  return message || t('error.save-failed')
+}
+
 async function rSave(): Promise<void> {
   if (!rDraft.value || !rCanSave.value) return
-  rSaving.value = true; rError.value = ''; rSummary.value = ''
+  rSaving.value = true; rError.value = ''; rErrorUsages.value = []; rSummary.value = ''
   const payload = { key: rDraft.value.key.trim(), label: rDraft.value.label.trim(), one_line: rDraft.value.one_line.trim(), system_prompt: rDraft.value.system_prompt }
   // Capture before awaiting — the draft can be swapped out while requests are in flight.
   const originalKey = rDraft.value.originalKey
   const wasRename = !rDraft.value.isNew && originalKey && originalKey !== payload.key
   try {
+    // A key change is a single backend move: it repoints every stage slot naming
+    // the role and drops the old key atomically. Doing it here as
+    // upsert-then-delete stalled halfway, because roles.delete refuses while a
+    // slot still names the role.
+    if (wasRename) {
+      const outcome = await rolesApi.rename(originalKey, payload)
+      if (!outcome.ok) {
+        rError.value = rRenameErrorMessage(outcome.code, outcome.message, payload.key, originalKey)
+        notify.toast(rError.value, { type: 'error' })
+        return
+      }
+      rSelectKey(outcome.role.key)
+      rSummary.value = t('label.saved-name', { name: payload.label })
+      const repointed = outcome.repointedPipelineIds.length
+      // The rename edited stage data, so say so rather than letting pipelines
+      // change under the user silently.
+      if (repointed > 0) {
+        notify.toast(t('label.role-rename-repointed', { count: repointed }), { type: 'success' })
+      }
+      return
+    }
     // rolesApi.* resolve to null/false on failure instead of throwing, so the
     // catch below never sees backend errors — surface them explicitly.
     const role = await rolesApi.upsert(payload)
     if (!role) {
-      rError.value = rolesApi.error.value || 'Save failed'
-      notify.toast(rError.value, { type: 'error' })
-      return
-    }
-    if (wasRename && !(await rolesApi.remove(originalKey))) {
-      rError.value = rolesApi.error.value || 'Rename cleanup failed'
+      rError.value = rolesApi.error.value || t('error.save-failed')
       notify.toast(rError.value, { type: 'error' })
       return
     }
     rSelectKey(role.key)
-    rSummary.value = `Saved "${payload.label}"`
+    rSummary.value = t('label.saved-name', { name: payload.label })
   } catch (err) { rError.value = String((err as Error).message ?? err) }
   finally { rSaving.value = false }
 }
@@ -509,11 +605,22 @@ async function rDoDelete(): Promise<void> {
   const ok = await rolesApi.remove(rDraft.value.originalKey || rDraft.value.key)
   rConfirmDelete.value = false
   if (ok) rSelectKey(rSorted.value[0]?.key ?? null)
-  else rError.value = rolesApi.error.value
+  else {
+    rError.value = rolesApi.error.value
+    rErrorUsages.value = rolesApi.roleUsages.value
+  }
+}
+
+/** Jump from a blocking usage to the stage that owns it, so the fix is one
+ *  click away. Reuses the deep-link path the host uses. */
+async function rGoToUsage(usage: RoleUsage): Promise<void> {
+  await openPipelineDeepLink(usage.pipeline_id)
+  if (sActiveStages.value.some((s) => s.id === usage.stage_id)) sSelectStage(usage.stage_id)
 }
 async function rDoReset(): Promise<void> {
   const ok = await rolesApi.reset()
   rConfirmReset.value = false
+  rErrorUsages.value = []
   if (ok) rSelectKey(rSorted.value[0]?.key ?? null)
   else rError.value = rolesApi.error.value
 }
@@ -522,14 +629,14 @@ async function rExport(): Promise<void> {
   rExportBusy.value = true
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   const envelope = { format_version: 1, exported_at: new Date().toISOString(), roles: rolesApi.roles.value }
-  const result = await window.agentTeam.saveJson({ title: 'Export roles', defaultName: `agent-team-roles-${stamp}.json`, content: JSON.stringify(envelope, null, 2) })
-  if (result.ok) rSummary.value = `Exported ${envelope.roles.length} role(s)`
+  const result = await window.agentTeam.saveJson({ title: t('label.export-roles-title'), defaultName: `agent-team-roles-${stamp}.json`, content: JSON.stringify(envelope, null, 2) })
+  if (result.ok) rSummary.value = t('label.exported-roles', { count: envelope.roles.length })
   rExportBusy.value = false
 }
 async function rImport(): Promise<void> {
   if (!window.agentTeam?.openJson) return
   rImporting.value = true
-  const result = await window.agentTeam.openJson({ title: 'Import roles JSON' })
+  const result = await window.agentTeam.openJson({ title: t('label.import-roles-title') })
   if (result.ok && result.content) {
     try {
       const parsed = JSON.parse(result.content)
@@ -540,8 +647,8 @@ async function rImport(): Promise<void> {
         if (typeof e?.key === 'string' && e.key && typeof e.system_prompt === 'string')
           if (await rolesApi.upsert({ key: e.key as string, label: String(e.label ?? e.key), one_line: String(e.one_line ?? ''), system_prompt: e.system_prompt as string })) ok++
       }
-      rSummary.value = `Imported ${ok} role(s)`
-    } catch (err) { rError.value = `Invalid JSON: ${(err as Error).message}` }
+      rSummary.value = t('label.imported-roles', { count: ok })
+    } catch (err) { rError.value = t('error.invalid-json', { message: (err as Error).message }) }
   }
   rImporting.value = false
 }
@@ -586,7 +693,7 @@ function buildAiContext(): string {
       <div class="pm-modal nv-modal-shell nv-modal-shell--wide">
   <div class="app">
     <header class="top">
-      <div class="title">Pipeline Manager</div>
+      <div class="title">{{ $t('label.pipeline-manager') }}</div>
       <nav class="tabs">
         <button :class="{ active: activeTab === 'pipelines' }" @click="activeTab = 'pipelines'">
           {{ $t('settings.nav.pipelines') }}
@@ -597,9 +704,9 @@ function buildAiContext(): string {
       </nav>
       <div class="meta">
         <span class="dot" :class="statusClass"></span>
-        <span>backend {{ backend.status.value }}</span>
+        <span>{{ $t('label.backend-status', { status: backend.status.value }) }}</span>
       </div>
-      <button class="pm-close" title="Close (ESC)" @click="emit('close')">✕</button>
+      <button class="pm-close" :title="$t('action.close-esc')" @click="emit('close')">✕</button>
     </header>
 
     <div class="main-row">
@@ -609,16 +716,16 @@ function buildAiContext(): string {
       <!-- List view -->
       <template v-if="plView === 'list'">
         <div class="toolbar">
-          <button class="ghost" :disabled="plBusy" @click="plCreating = !plCreating">＋ New Pipeline</button>
+          <button class="ghost" :disabled="plBusy" @click="plCreating = !plCreating">{{ $t('action.new-pipeline') }}</button>
           <span v-if="plSummary" class="summary-ok">{{ plSummary }}</span>
         </div>
         <div v-if="plCreating" class="pl-create-row">
           <input
-            v-model="plNewName" type="text" placeholder="Pipeline name…" class="pl-input"
+            v-model="plNewName" type="text" :placeholder="$t('label.pipeline-name-placeholder')" class="pl-input"
             spellcheck="false"
             @keyup.enter="plCreate" @keyup.escape="plCreating = false; plNewName = ''" />
-          <button class="ghost" :disabled="!plNewName.trim() || plBusy" @click="plCreate">Create</button>
-          <button class="ghost" @click="plCreating = false; plNewName = ''">Cancel</button>
+          <button class="ghost" :disabled="!plNewName.trim() || plBusy" @click="plCreate">{{ $t('action.create') }}</button>
+          <button class="ghost" @click="plCreating = false; plNewName = ''">{{ $t('action.cancel') }}</button>
         </div>
         <ul v-if="pipelinesApi.pipelines.value.length" class="pl-list">
           <li
@@ -627,22 +734,22 @@ function buildAiContext(): string {
             role="button"
             @click="plEnterDetail(p.id)">
             <span class="pl-name">{{ p.name }}</span>
-            <span class="pl-meta">{{ p.stage_count }} stage(s)</span>
+            <span class="pl-meta">{{ $t('label.stage-count', { count: p.stage_count }) }}</span>
             <span v-if="p.id === pipelinesApi.activePipelineId.value" class="pl-badge">{{ $t('label.default') }}</span>
             <button
               v-if="p.builtin" class="icon-btn" :disabled="plBusy"
-              title="Reset to factory stages"
+              :title="$t('action.reset-factory-stages')"
               @click.stop="plResetBuiltin(p)">↺</button>
             <span class="pl-enter">›</span>
           </li>
         </ul>
-        <p v-else class="hint nv-empty nv-empty--inline">No pipelines loaded yet…</p>
+        <p v-else class="hint nv-empty nv-empty--inline">{{ $t('label.no-pipelines') }}</p>
       </template>
 
       <!-- Detail view: pipeline header + stage editor -->
       <template v-else>
         <div class="pl-detail-header">
-          <button class="ghost back-btn nv-btn" @click="plBackToList">← Back</button>
+          <button class="ghost back-btn nv-btn" @click="plBackToList">← {{ $t('action.back') }}</button>
           <template v-if="plRenamingId === plEditingId">
             <input
               v-model="plRenameText" class="pl-input pl-rename" spellcheck="false"
@@ -662,7 +769,7 @@ function buildAiContext(): string {
             <span v-if="plEditingId === pipelinesApi.activePipelineId.value" class="pl-badge">{{ $t('label.default') }}</span>
             <button
               v-else class="ghost" :disabled="plBusy"
-              @click="plSetActive(plEditingId)">✓ Set as default</button>
+              @click="plSetActive(plEditingId)">{{ $t('action.set-as-default') }}</button>
             <button
               class="icon-btn danger-icon"
               :disabled="plBusy || pipelinesApi.pipelines.value.length <= 1"
@@ -671,7 +778,7 @@ function buildAiContext(): string {
           </div>
         </div>
 
-        <div v-if="stagesApi.loading.value" class="hint pad">Loading stages…</div>
+        <div v-if="stagesApi.loading.value" class="hint pad">{{ $t('label.loading-stages') }}</div>
         <template v-else>
           <div class="toolbar">
             <button class="ghost" :disabled="sExportBusy" @click="sExport">{{ sExportBusy ? '…' : $t('settings.roles.export-json') }}</button>
@@ -696,10 +803,10 @@ function buildAiContext(): string {
                   </div>
                   <div class="item-label">
                     {{ s.shortTitle }}
-                    <span v-if="s.slots.some(sl => sl.isCommander)" class="manager-badge" :title="`Manager: ${s.slots.find(sl => sl.isCommander)?.label}`">🎯</span>
+                    <span v-if="s.slots.some(sl => sl.isCommander)" class="manager-badge" :title="$t('label.manager-slot', { label: s.slots.find(sl => sl.isCommander)?.label })">🎯</span>
                   </div>
                   <div class="item-sub">
-                    {{ s.slots.length === 1 ? `${s.slots[0].agentKey} · ${s.slots[0].roleKey}` : `${s.slots.length} parallel slots` }}
+                    {{ s.slots.length === 1 ? `${s.slots[0].agentKey} · ${s.slots[0].roleKey}` : $t('label.parallel-slots', { count: s.slots.length }) }}
                   </div>
                 </li>
               </ul>
@@ -721,7 +828,7 @@ function buildAiContext(): string {
                 </div>
                 <div class="field">
                   <label class="lbl">{{ $t('label.short-title') }}</label>
-                  <input v-model="sDraft.shortTitle" type="text" placeholder="e.g. Review" spellcheck="false" />
+                  <input v-model="sDraft.shortTitle" type="text" :placeholder="$t('label.stage-short-title-placeholder')" spellcheck="false" />
                 </div>
               </div>
               <div class="field">
@@ -734,25 +841,25 @@ function buildAiContext(): string {
                   <input v-model="sDraft.sentinel" type="text" placeholder="---DONE---" spellcheck="false" />
                 </div>
                 <div class="field">
-                  <label class="lbl">Allow questions</label>
-                  <label class="check-row"><input v-model="sDraft.allowQuestions" type="checkbox" /><span>Pause for user answers</span></label>
+                  <label class="lbl">{{ $t('label.allow-questions') }}</label>
+                  <label class="check-row"><input v-model="sDraft.allowQuestions" type="checkbox" /><span>{{ $t('hint.pause-for-user-answers') }}</span></label>
                 </div>
               </div>
               <div class="field">
-                <label class="lbl">Context7 doc query</label>
-                <input v-model="sDraft.docQuery" type="text" placeholder="e.g. security best practices, authentication" spellcheck="false" />
+                <label class="lbl">{{ $t('label.context7-doc-query') }}</label>
+                <input v-model="sDraft.docQuery" type="text" :placeholder="$t('label.doc-query-placeholder')" spellcheck="false" />
               </div>
               <div class="slots-section">
                 <div class="row-g spread">
-                  <label class="lbl">Slots <span class="slot-required">* at least one required</span></label>
+                  <label class="lbl">{{ $t('label.slots') }} <span class="slot-required">{{ $t('hint.at-least-one-slot-required') }}</span></label>
                   <button class="ghost small" @click="sStartAddSlot">{{ $t('action.add-slot') }}</button>
                 </div>
-                <p v-if="!sDraft.slots?.length" class="warn-msg">Add at least one slot before saving.</p>
+                <p v-if="!sDraft.slots?.length" class="warn-msg">{{ $t('hint.add-slot-before-saving') }}</p>
                 <template v-for="(slot, i) in sDraft.slots" :key="i">
                   <div v-if="sEditingSlotIndex !== i" class="slot-item" @click="sStartEditSlot(i)">
                     <div class="row-g spread">
-                      <span class="item-label">{{ slot.label }}<span v-if="slot.isCommander" class="manager-badge">🎯 Manager</span></span>
-                      <button class="icon-btn danger-icon" :disabled="sDraft.slots.length <= 1" title="Cannot delete the last slot" @click.stop="sRemoveSlot(i)">✕</button>
+                      <span class="item-label">{{ slot.label }}<span v-if="slot.isCommander" class="manager-badge">{{ $t('label.manager-badge') }}</span></span>
+                      <button class="icon-btn danger-icon" :disabled="sDraft.slots.length <= 1" :title="$t('hint.cannot-delete-last-slot')" @click.stop="sRemoveSlot(i)">✕</button>
                     </div>
                     <div class="item-sub">{{ slot.agentKey }} · {{ slot.roleKey }}</div>
                   </div>
@@ -764,18 +871,18 @@ function buildAiContext(): string {
                     <div class="field">
                       <label class="lbl">{{ $t('label.role-key') }}</label>
                       <select v-model="sSlotDraft.roleKey">
-                        <option value="">(unassigned)</option>
+                        <option value="">{{ $t('label.unassigned') }}</option>
                         <option v-for="r in rolesApi.roles.value" :key="r.key" :value="r.key">{{ r.label }} ({{ r.key }})</option>
                       </select>
                     </div>
                     <label class="check-row manager-toggle">
                       <input v-model="sSlotDraft.isCommander" type="checkbox" />
-                      <span><strong>🎯 Designate as global manager</strong> — This slot finishes its own work, prints <code>---MANAGER-READY---</code>, then coordinates across stages. Only one manager per pipeline.</span>
+                      <span><strong>{{ $t('label.designate-global-manager') }}</strong> {{ $t('hint.global-manager-desc-1') }} <code>---MANAGER-READY---</code>{{ $t('hint.global-manager-desc-2') }}</span>
                     </label>
                     <div class="field"><label class="lbl">{{ $t('label.kickoff-body') }}</label><textarea v-model="sSlotDraft.kickoffBody" rows="4" spellcheck="false" class="mono"></textarea></div>
                     <div class="row-g gap">
                       <button class="ghost" @click="sCancelAddSlot">{{ $t('action.cancel') }}</button>
-                      <button class="primary nv-btn nv-btn--primary" :disabled="!sSlotDraft.label.trim()" @click="sSaveEditSlot">Save slot</button>
+                      <button class="primary nv-btn nv-btn--primary" :disabled="!sSlotDraft.label.trim()" @click="sSaveEditSlot">{{ $t('action.save-slot') }}</button>
                     </div>
                   </div>
                 </template>
@@ -787,13 +894,13 @@ function buildAiContext(): string {
                   <div class="field">
                     <label class="lbl">{{ $t('label.role-key') }}</label>
                     <select v-model="sSlotDraft.roleKey">
-                      <option value="">(unassigned)</option>
+                      <option value="">{{ $t('label.unassigned') }}</option>
                       <option v-for="r in rolesApi.roles.value" :key="r.key" :value="r.key">{{ r.label }} ({{ r.key }})</option>
                     </select>
                   </div>
                   <label class="check-row manager-toggle">
                     <input v-model="sSlotDraft.isCommander" type="checkbox" />
-                    <span><strong>🎯 Designate as global manager</strong> — Only one per pipeline.</span>
+                    <span><strong>{{ $t('label.designate-global-manager') }}</strong> {{ $t('hint.global-manager-desc-short') }}</span>
                   </label>
                   <div class="field"><label class="lbl">{{ $t('label.kickoff-body') }}</label><textarea v-model="sSlotDraft.kickoffBody" rows="4" spellcheck="false" class="mono"></textarea></div>
                   <div class="row-g gap">
@@ -827,7 +934,7 @@ function buildAiContext(): string {
               v-for="r in rSorted" :key="r.key"
               :class="{ active: rSelectedKey === r.key && rDraft && !rDraft.isNew }"
               @click="rSelectKey(r.key)">
-              <div class="row-g"><span class="mono-key">{{ r.key }}</span><span v-if="r.is_default" class="badge">default</span></div>
+              <div class="row-g"><span class="mono-key">{{ r.key }}</span><span v-if="r.is_default" class="badge">{{ $t('label.default') }}</span></div>
               <div class="item-label">{{ r.label }}</div>
               <div class="item-sub">{{ r.one_line }}</div>
             </li>
@@ -842,25 +949,37 @@ function buildAiContext(): string {
             </div>
           </div>
           <p v-if="rError" class="err-msg">{{ rError }}</p>
+          <div v-if="rErrorUsages.length" class="role-usage-block">
+            <p class="hint">{{ $t('hint.role-in-use-list') }}</p>
+            <ul class="role-usage-list">
+              <li v-for="(u, i) in rErrorUsages" :key="i">
+                <button class="usage-link" :title="$t('action.go-to-stage')" @click="rGoToUsage(u)">
+                  {{ u.pipeline_name || u.pipeline_id }} › {{ u.stage_title || u.stage_id }} › {{ u.slot_label || $t('label.unassigned') }}
+                </button>
+              </li>
+            </ul>
+          </div>
           <div class="two-col">
             <div class="field">
               <label class="lbl">{{ $t('settings.roles.key-label') }}</label>
               <input v-model="rDraft.key" type="text" placeholder="lowercase_key" spellcheck="false" :disabled="!rDraft.isNew && rDraft.originalKey === 'pm'" />
-              <p v-if="rDraft.isNew && rolesApi.find(rDraft.key.trim())" class="warn-msg">key already exists</p>
+              <p v-if="rKeyTaken" class="warn-msg">
+                {{ rDraft.isNew ? $t('error.key-exists') : $t('hint.role-key-exists-recover', { key: rDraft.key.trim() }) }}
+              </p>
             </div>
             <div class="field">
               <label class="lbl">{{ $t('settings.roles.label-label') }}</label>
-              <input v-model="rDraft.label" type="text" placeholder="e.g. Tech Lead" spellcheck="false" />
+              <input v-model="rDraft.label" type="text" :placeholder="$t('label.role-label-placeholder')" spellcheck="false" />
             </div>
           </div>
           <div class="field">
             <label class="lbl">{{ $t('settings.roles.one-line-label') }}</label>
-            <input v-model="rDraft.one_line" type="text" placeholder="short hint shown in dropdown" spellcheck="false" />
+            <input v-model="rDraft.one_line" type="text" :placeholder="$t('label.role-one-line-placeholder')" spellcheck="false" />
           </div>
           <div class="field">
             <label class="lbl">{{ $t('settings.roles.system-prompt-label') }}</label>
             <textarea v-model="rDraft.system_prompt" rows="14" spellcheck="false"></textarea>
-            <p class="hint">{{ rDraft.system_prompt.length }} chars · Changes apply to new spawns only</p>
+            <p class="hint">{{ $t('hint.prompt-chars-new-spawns', { count: rDraft.system_prompt.length }) }}</p>
           </div>
         </section>
         <section v-else class="split-detail empty-detail">
@@ -1465,6 +1584,30 @@ button.small {
   color: var(--danger-fg);
   font-size: var(--font-xs);
   margin: 0;
+}
+.role-usage-block {
+  margin: 6px 0 0;
+}
+.role-usage-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.usage-link {
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: var(--accent-bright);
+  font-size: var(--font-2xs);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.usage-link:hover {
+  text-decoration: underline;
 }
 
 /* ── Modals ───────────────────────────────────────────────────────────────── */

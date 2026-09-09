@@ -62,7 +62,11 @@ describe('agent.activity — a turn end the Stop hook superseded', () => {
     const start = appSource.indexOf("if (ev.event_type === 'turn_complete') {")
     expect(start).toBeGreaterThan(-1)
     const body = appSource.slice(start, start + 3000)
-    expect(body).toContain('if (!ev.superseded) paneTurnCompleteAt.set(ev.pane_id, Date.now())')
+    // Matched on the guard rather than the exact call: what this test owns is
+    // that the idle timestamp is the thing skipped when the turn was
+    // superseded, not how that timestamp is recorded.
+    const guarded = body.slice(body.indexOf('if (!ev.superseded) {'), body.indexOf('markTurnComplete'))
+    expect(guarded).toContain('recordTurnComplete(paneTurnCompleteAt, ev.pane_id')
     expect(body).toContain('if (!markerReply && !ev.superseded) scheduleDoneNotify')
   })
 
